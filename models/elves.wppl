@@ -1,0 +1,58 @@
+// run webppl elves.wppl
+var words = ['word1', 'word2', 'word3', 'word4', 'word5']
+
+// parameters
+var noise = .1
+var alpha = 1
+var w_c = .5
+
+var utteranceCost = function(label) {
+  if(label == 'word1' || label == 'word2') {
+    return 1.5
+  } else {
+    return 1
+  }
+}
+
+var meaning = function(label) {
+  if(label == 'word1') {
+    return Gaussian({mu: 1, sigma: noise})
+  } else if(label == 'word2') {
+    return Gaussian({mu: 1.9, sigma: noise})
+  } else if(label == 'word3') {
+    return Gaussian({mu: 2, sigma: noise})
+  } else if(label == 'word4') {
+    return Gaussian({mu: 2.1, sigma: noise})
+  } else {
+    return Gaussian({mu: 3, sigma: noise})
+  }
+}
+
+// dumb elf
+var L0 = function(word) {
+  return meaning(word)
+}
+
+// you, the smart human
+var S1 = function(trueAngle) {
+  return Infer({method: 'enumerate', model: function() {
+    var utterance = sample(Categorical({vs: words}))
+    var informativity = L0(utterance).score(trueAngle)
+    var cost = utteranceCost(utterance)
+    var utility = informativity - w_c * cost
+    factor(alpha * utility)
+    return utterance
+  }})
+}
+
+// smart elf
+var L1 = function(word) {
+  return Infer({method: 'SMC', particles: 10000, model: function() {
+    var angle = sample(Uniform({a: 0, b: 4}))
+    observe(S1(angle), word)
+    return angle
+  }})
+}
+
+console.log(S1(2))
+//viz(L1('word3'))
