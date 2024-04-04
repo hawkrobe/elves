@@ -1,58 +1,100 @@
 // run webppl elves.wppl
-var words = ['word1', 'word2', 'word3', 'word4', 'word5']
+
+var runNum = argv.runNum
+
+//var test_angle = argv.test_angle
+var test_angle = argv.test_angle
+
+// start with 3 words
+// var words = ['word1', 'word2', 'word3']
+
+var word1 = 'word1'
+var word2 = 'word2'
+var word3 = 'word3'
+
+var words = [word1, word2, word3]
+
+// define the frequency distribution
+// var freqs = ["HF", "LF", "HF"]
+
+var freq1 = argv.freq1
+var freq2 = argv.freq2
+var freq3 = argv.freq3
+
+var freqs = [freq1, freq2, freq3]
+// define locations/angles from [0-1] for words
+// var word_loc = [0, .5, 1]
+
+var word_loc1 = 0
+var word_loc2 = .5
+var word_loc3 = 1
+
+var word_loc = [word_loc1, word_loc2, word_loc3]
+
+var lf_cost = argv.lf_cost //low frequency has higher retrieval cost
+var hf_cost = argv.hf_cost //hf has low retrieval cost
 
 // parameters
-var noise = .1
+var noise = argv.noise
 var alpha = 1
-var w_c = .5
+var w_c = .5 //general cost of retrieval?
 
-var utteranceCost = function(label) {
-  if(label == 'word1' || label == 'word2') {
-    return 1.5
-  } else {
-    return 1
+var utteranceCost = function(label_index){
+  if(freqs[label_index] == "HF") {
+    return hf_cost
+  } else{
+    return lf_cost
   }
 }
 
-var meaning = function(label) {
-  if(label == 'word1') {
-    return Gaussian({mu: 1, sigma: noise})
-  } else if(label == 'word2') {
-    return Gaussian({mu: 1.9, sigma: noise})
-  } else if(label == 'word3') {
-    return Gaussian({mu: 2, sigma: noise})
-  } else if(label == 'word4') {
-    return Gaussian({mu: 2.1, sigma: noise})
-  } else {
-    return Gaussian({mu: 3, sigma: noise})
-  }
+
+var meaning = function(label_index) {
+  return Gaussian({mu: word_loc[label_index], sigma: noise})
 }
 
-// dumb elf
-var L0 = function(word) {
-  return meaning(word)
+
+// dumb elf listener
+var L0 = function(utterance_index) {
+  return meaning(utterance_index)
 }
 
-// you, the smart human
-var S1 = function(trueAngle) {
+// speaker
+var S1 = function(trueAngle) { //takes an angle
   return Infer({method: 'enumerate', model: function() {
-    var utterance = sample(Categorical({vs: words}))
-    var informativity = L0(utterance).score(trueAngle)
-    var cost = utteranceCost(utterance)
+    // I want this to be more flexible, can I construct this list based on the length of words? 
+    var utterance_index = sample(Categorical({vs: [0,1,2]})) //samples an index instead of word?
+    var informativity = L0(utterance_index).score(trueAngle)
+    var cost = utteranceCost(utterance_index)
     var utility = informativity - w_c * cost
     factor(alpha * utility)
-    return utterance
+    return words[utterance_index]
   }})
 }
 
-// smart elf
+// smart listener
 var L1 = function(word) {
   return Infer({method: 'SMC', particles: 10000, model: function() {
-    var angle = sample(Uniform({a: 0, b: 4}))
+    var angle = sample(Uniform({a: 0, b: 1}))
     observe(S1(angle), word)
     return angle
   }})
 }
 
-console.log(S1(2))
-//viz(L1('word3'))
+// write to csv
+
+var s1_dists = S1(test_angle)
+
+var outputFile = csv.open('./outputs/output-data_'+ runNum +'.csv')
+
+csv.writeLine('runNum,freq1,freq2,freq3,loc1,loc2,loc3,lf_cost,hf_cost,noise,test_angle,' 
+              + 'prob_word1,prob_word2,prob_word3', outputFile)
+
+csv.writeLine([runNum, freq1, freq2, freq3, word_loc1, word_loc2, word_loc3, 
+  lf_cost, hf_cost, noise,
+  test_angle,
+  Math.exp(s1_dists.score('word1')),
+  Math.exp(s1_dists.score('word2')),
+  Math.exp(s1_dists.score('word3'))
+].join(","), outputFile)
+
+csv.close(outputFile)
