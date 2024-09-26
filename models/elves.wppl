@@ -39,6 +39,12 @@ var noise = argv.noise
 var alpha = 1
 var w_c = .5 //general cost of retrieval?
 
+// noise by frequency?
+
+// var hf_noise = argv.hf_noise
+// var lf_noise = argv.lf_noise
+
+
 var utteranceCost = function(label_index){
   if(freqs[label_index] == "HF") {
     return hf_cost
