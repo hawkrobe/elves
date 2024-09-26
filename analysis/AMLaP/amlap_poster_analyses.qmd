@@ -1,0 +1,375 @@
+---
+title: "amlap_poster_analyses"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(here)
+
+write_plot_path <- here("analysis/AMLaP/poster/figs")
+```
+
+# Replicate OG Paper Data
+
+```{r}
+participant_data <- read_csv(here('data/koranda2020/Words_final_preprocessed.csv'))
+
+# I want to do this but retain the angles? 
+by_angle_proportions <- participant_data %>% 
+  filter(trialType=='test', conditionTypeComb == "different") %>% 
+  mutate(nearest_is_lf = nearestLabel==lowFreqLabel) %>% 
+  group_by(nearest_is_lf, choiceKind, angle) %>% 
+  reframe(n = length(choiceKind)) %>% ungroup() %>% 
+  group_by(nearest_is_lf, angle) %>% 
+  mutate(n_category = sum(n), prop = n / n_category) %>% 
+  drop_na()
+
+
+angle_data <- participant_data %>% 
+  filter(trialType=='test', conditionTypeComb == "different") |> 
+  select(choiceKind, conditionType, conditionTypeComb, angle, nearestLabel, highFreqLabel, lowFreqLabel, nearbyAngle1, nearbyFreq1, nearbyAngle2, nearbyFreq2) |> 
+  rowwise() |> 
+  mutate(nearbyAngle1_adj = nearbyAngle1- min(nearbyAngle1, nearbyAngle2),
+         nearbyAngle2_adj = nearbyAngle2- min(nearbyAngle1, nearbyAngle2),
+         angle_adj = angle - min(nearbyAngle1, nearbyAngle2)) |> 
+  mutate(angle_norm = angle_adj/(max(nearbyAngle1_adj, nearbyAngle2_adj)),
+         abs_distance_from_target_angle = min(abs(1-angle_norm), abs(angle_norm))) |> 
+ungroup() |> 
+  mutate(abs_distance_from_target_angle_cut = cut(abs_distance_from_target_angle, breaks = c(0.00, 0.05, 0.10, 0.15, 0.20,0.25, 0.30, 0.35, 0.40, 0.45, 0.50), , include.lowest = T))
+
+angle_data_prop <- angle_data|> 
+    mutate(nearest_is_lf = nearestLabel==lowFreqLabel) %>% 
+  group_by(nearest_is_lf, choiceKind, abs_distance_from_target_angle_cut) %>% 
+  reframe(n = length(choiceKind)) %>% ungroup() %>% 
+  group_by(nearest_is_lf, abs_distance_from_target_angle_cut) %>% 
+  mutate(n_category = sum(n), prop = n / n_category) %>% 
+  drop_na()
+
+overall_proportions <- participant_data %>% 
+  subset(trialType=='test') %>% 
+  mutate(nearest_is_lf = nearestLabel==lowFreqLabel) %>% 
+  group_by(nearest_is_lf, choiceKind) %>% 
+  reframe(n = length(choiceKind)) %>% ungroup() %>% 
+  group_by(nearest_is_lf) %>% 
+  mutate(n_category = sum(n), prop = n / n_category) %>% 
+  drop_na()
+```
+
+```{r}
+merged_model_data <-
+  do.call(rbind,
+          lapply(list.files(path = here("models/outputs/"), full.names = T), read.csv))
+# tidy
+
+# run, test_angle, word, frequency, location, cost, prob
+locations <- merged_model_data |> 
+  select(runNum, starts_with("loc")) |> 
+  pivot_longer(cols = starts_with("loc"), 
+               names_to = c("word"), 
+               values_to = "location") |> 
+  mutate(word = paste0("word",gsub("[^0-9.-]", "", word)))
+
+frequencies <- merged_model_data |> 
+  mutate(context_freq = paste(freq1, freq2, freq3, sep = "-")) |> 
+  select(runNum, context_freq, starts_with("freq")) |> 
+  pivot_longer(cols = starts_with("freq"), 
+               names_to = c("word"), 
+               values_to = "frequency") |> 
+  mutate(word = paste0("word",gsub("[^0-9.-]", "", word)))
+
+probabilities <- merged_model_data |> 
+  select(runNum, starts_with("prob")) |> 
+  pivot_longer(cols = starts_with("prob"), 
+               names_to = c("word"), 
+               values_to = "prob") |> 
+  mutate(word = gsub("prob_", "", word))
+
+
+costs <- merged_model_data |> 
+  mutate(cost_ratio = lf_cost/hf_cost) |> 
+  select(runNum, cost_ratio, ends_with("cost")) |> 
+  pivot_longer(cols = ends_with("cost"), 
+               names_to = c("frequency"), 
+               values_to = "cost") |> 
+  mutate(frequency = ifelse(frequency =="lf_cost", "LF", "HF"))
+  #mutate(word = paste0("word",gsub("[^0-9.-]", "", word)))
+
+angles <- merged_model_data |> select(runNum, test_angle, noise) |> 
+  mutate(nearest_word = case_when(test_angle < .25 ~ "word1",
+                                  test_angle > .25 & test_angle <= .5 ~ "word2",
+                                  test_angle > .5 ~ "word3",
+                                  TRUE ~ "split"))
+
+tidy_joined <- locations |> 
+  left_join(frequencies) |> 
+  left_join(costs) |>  
+  left_join(probabilities) |> 
+  left_join(angles) |> 
+  mutate(distance_from_target_angle = test_angle-location,
+         abs_distance_from_target_angle = abs(test_angle-location))
+```
+
+## Human v Model
+
+```{r}
+proportion_human <- by_angle_proportions |> 
+  ggplot(aes(fill=choiceKind, y=prop, x=nearest_is_lf)) + 
+  geom_bar(data = overall_proportions, aes(fill=choiceKind, y=prop, x=nearest_is_lf),
+           position=position_dodge(.9), stat = "identity", alpha = .9) +
+  geom_point(position=position_dodge(.9), alpha = .05) + 
+  scale_x_discrete('Nearest Word Frequency',
+                     labels=c("High frequency", "Low frequency")) + 
+  ylab("Proportion of Responses") + 
+  scale_fill_viridis_d('Label Produced') + 
+  labs(title = "",
+       subtitle = "Human Responses") +
+  theme_minimal() + 
+  theme(legend.position = "bottom")+
+  ylim(c(0,1))
+
+proportion_human
+
+ggsave(here(write_plot_path, "human_production.pdf"), height = 3, width = 5)
+
+```
+
+```{r}
+proportion_model_grid <- tidy_joined |> 
+  left_join(frequencies |> 
+              rename(nearest_word = word,  nearest_frequency = frequency)) |> 
+    filter(! is.na(nearest_frequency)) |> 
+  filter( context_freq == "HF-LF-HF") |> 
+  mutate(word_label = case_when(word == "word1" ~ "High frequency",
+                                word == "word2" ~ "Low frequency",
+                                TRUE ~ "other")) |> 
+  ggplot(aes(x = nearest_frequency, y = prob, fill = word_label)) +
+  geom_bar(alpha = .9, 
+           position = position_dodge(width = .9), stat = "summary") +
+  geom_point(alpha = .5, position = position_dodge(width = .9)) +
+  scale_fill_viridis_d('Label Produced') + 
+  scale_color_viridis_d('Label Produced') + 
+  scale_x_discrete('Nearest Word Frequency',
+                     labels=c("High frequency", "Low frequency")) + 
+  ylab("Probability of Producing") + 
+  labs(title = "",
+       subtitle = "Model Predictions") +
+  theme_minimal() + 
+  theme(legend.position = "bottom")+
+  ylim(c(0,1)) +
+  facet_grid(cols = vars(cost_ratio), rows = vars(noise))
+proportion_model_grid
+#ggsave(here(write_plot_path, "model_production.pdf"), height = 3, width = 5)
+
+```
+
+```{r}
+proportion_model <- tidy_joined |> 
+  left_join(frequencies |> 
+              rename(nearest_word = word,  nearest_frequency = frequency)) |> 
+    filter(! is.na(nearest_frequency)) |> 
+  filter(noise == .2, cost_ratio == 2.5, context_freq == "HF-LF-HF") |> 
+  mutate(word_label = case_when(word == "word1" ~ "High frequency",
+                                word == "word2" ~ "Low frequency",
+                                TRUE ~ "other")) |> 
+  ggplot(aes(x = nearest_frequency, y = prob, fill = word_label)) +
+  geom_bar(alpha = .9, 
+           position = position_dodge(width = .9), stat = "summary") +
+  geom_point(alpha = .5, position = position_dodge(width = .9)) +
+  scale_fill_viridis_d('Label Produced') + 
+  scale_color_viridis_d('Label Produced') + 
+  scale_x_discrete('Nearest Word Frequency',
+                     labels=c("High frequency", "Low frequency")) + 
+  ylab("Probability of Producing") + 
+  labs(title = "",
+       subtitle = "Model Predictions") +
+  theme_minimal() + 
+  theme(legend.position = "bottom")+
+  ylim(c(0,1))
+proportion_model
+#ggsave(here(write_plot_path, "model_production.pdf"), height = 3, width = 3)
+```
+
+```{r}
+library(ggpubr)
+
+ggarrange(proportion_human, proportion_model, 
+align='h', labels=c('A', 'B'),
+common.legend = T, legend = "bottom")
+
+```
+
+# Parameter Search
+
+```{r}
+target_angles <- c(0, .1, .25, .4, .5)
+target_costs <- c(1,2,3,4)
+runs_of_interest <- merged_model_data |> 
+  filter(freq1 == "HF" & freq2 == "LF") |> 
+  filter(test_angle %in% target_angles) |>
+  pull(runNum)
+
+tidy_joined |> 
+       filter(runNum %in% runs_of_interest, noise == .2) |> 
+  filter(cost_ratio %in% target_costs) |> 
+  ggplot(aes(x = location, y = prob)) + 
+  geom_line(aes(color = as.factor(cost_ratio), group = runNum)) + 
+  geom_vline(aes(xintercept = test_angle), linetype = "dotted") +
+  geom_point() + 
+  theme_minimal() +
+  facet_wrap(~test_angle) +
+  scale_x_continuous(breaks = c(0, .5, 1), labels = c("HF", "LF", "HF")) +
+  labs(x = "Word",
+       y = "Probability of Producing Word", 
+       color = "Low Freq. Cost",
+       subtitle = "Faceted by angle") + 
+  scale_color_manual(values = viridis::viridis(5)[1:4])
+
+ggsave(here(write_plot_path, "parameter_search.pdf"), height = 3, width = 5)
+  
+```
+
+# Probability across angle
+
+```{r}
+tidy_joined |> 
+  filter(word == "word2", context_freq =="HF-LF-HF") |> 
+  #filter(noise == .2) %>% 
+  ggplot(aes(abs(distance_from_target_angle), y = prob)) + 
+  geom_line(aes(group = cost, color = as.factor(cost_ratio))) + 
+  geom_point() + 
+  theme_minimal() + 
+  labs(title = "Probability of Producing Low Frequency Word",
+       subtitle = "With a High Frequency Alternative") +
+  labs(color = "Low Frequency Cost",
+       x = "Distance from Low Frequency Word",
+       y = "Probability of Selecting Low Frequency Word") +
+  scale_color_viridis_d('Low Frequency Cost') +
+  ylim(0, 1) +
+  facet_wrap(~noise)
+
+#ggsave(here(write_plot_path, "probability.pdf"), height = 3, width = 5)
+```
+
+Double check that probability data lol
+
+```{r}
+participant_data |> 
+  select(nearbyFreq1, nearbyFreq2, angleDiff, 
+         nearbyAngle1, nearbyAngle2, angle, highFreqChoiceGeneral) %>% 
+  filter(nearbyFreq1 == "hf" & nearbyFreq2 == "lf" | 
+           nearbyFreq1 == "lf" & nearbyFreq2 == "hf")
+
+```
+
+```{r}
+human_binomial <- participant_data |> 
+  select(nearbyFreq1, nearbyFreq2, angleDiff, nearbyAngle1, nearbyAngle2, angle, highFreqChoiceGeneral) |>
+  filter(nearbyFreq1 == "hf", nearbyFreq2 == "lf") |> 
+  # distance from low frequency?
+  mutate(lowfreqdistance = abs(nearbyAngle2 - angle),
+         lowFreqChoice = 1-highFreqChoiceGeneral) |> 
+  mutate(normed_lowfreqdistance = lowfreqdistance/(max(lowfreqdistance)*2))
+  
+  
+human_binomial %>% 
+  ggplot(aes(x = normed_lowfreqdistance, y = lowFreqChoice)) +
+  #geom_point(alpha = .05) +
+  geom_smooth(method = "glm", 
+    method.args = list(family = "binomial"), 
+    se = FALSE, color = "black", size = 1.5) + theme_minimal() +
+  labs(x = "Distance from Low Frequency Word",
+       y = "Selection of LF Word",
+       title = "Human Participant Data")
+
+
+participant_data |> 
+  select(nearbyFreq1, nearbyFreq2, angleDiff, nearbyAngle1, nearbyAngle2, angle, highFreqChoiceGeneral) |>
+  filter(nearbyFreq1 == "hf", nearbyFreq2 == "lf") |> 
+  # distance from low frequency?
+  mutate(lowfreqdistance = abs(nearbyAngle2 - angle),
+         lowFreqChoice = 1-highFreqChoiceGeneral) |> 
+  group_by(lowfreqdistance) |> 
+  summarize(n_select_lf = sum(lowFreqChoice),
+    prop_select_lf = n_select_lf/n()) |> 
+  mutate(normed_lowfreqdistance = lowfreqdistance/max(lowfreqdistance)) %>% 
+  ggplot(aes(x = normed_lowfreqdistance, y = prop_select_lf)) +
+  geom_point(alpha = .5) + theme_minimal() +
+  labs(x = "Distance from Low Frequency Word",
+       y = "Proportion Selecting LF Word",
+       title = "Human Participant Data")
+```
+
+```{r}
+tidy_joined |> 
+  filter(word == "word2", context_freq =="HF-LF-HF") |> 
+  filter(noise == .2, cost %in% c(1,2,3,4)) %>% 
+  ggplot(aes(abs(distance_from_target_angle), y = prob)) + 
+  #geom_smooth(data = human_binomial, aes(x = normed_lowfreqdistance, y = lowFreqChoice), 
+  #            method = "glm", 
+  #  method.args = list(family = "binomial"), 
+  #  se = FALSE, color = "black", size = 1.5) +
+  geom_line(aes(group = cost, color = as.factor(cost_ratio))) + 
+  geom_point() + 
+  theme_minimal() + 
+  labs(title = "Probability of Producing Low Frequency Word",
+       subtitle = "With a High Frequency Alternative") +
+  labs(color = "Low Frequency Cost",
+       x = "Distance from Low Frequency Word",
+       y = "Probability of Selecting Low Frequency Word") +
+  scale_color_viridis_d('Low Frequency Cost') +
+  ylim(0, 1) +
+  facet_wrap(~noise)
+```
+
+# Helper figures
+
+```{r}
+viridis::viridis(3)
+```
+
+```{r}
+library(ggplot2)
+
+alpha = .4
+
+varience = .25
+
+p1 <- ggplot(data = data.frame(x = c(0, 1)), aes(x)) +
+  stat_function(fun = dnorm, n = 101, args = list(mean = .5, sd = varience), 
+                alpha = alpha) + 
+  stat_function(fun = dnorm, n = 101, args = list(mean = .5, sd = varience), 
+                geom = "area", fill = "#21908CFF", alpha = alpha) + 
+  stat_function(fun = dnorm, n = 101, args = list(mean = 0, sd = varience), 
+                alpha = alpha) + 
+  stat_function(fun = dnorm, n = 101, args = list(mean = 0, sd = varience), 
+                geom = "area", fill = "#440154FF", alpha =alpha) + 
+  stat_function(fun = dnorm, n = 101, args = list(mean = 1, sd = varience), 
+                  alpha = alpha) + 
+  stat_function(fun = dnorm, n = 101, args = list(mean = 1, sd = varience), 
+                geom = "area", fill = "#440154FF", alpha = alpha) + 
+  ylab("") +
+  scale_y_continuous(breaks = NULL) +
+  scale_x_continuous(breaks = c(0, .5, 1)) +
+  theme_minimal() +
+  labs(x = "angle")
+p1
+
+ggsave(here(write_plot_path, "model_meaning_space_25.pdf"), height = 3, width = 5)
+```
+
+```{r}
+tidy_joined %>% 
+  filter(cost_ratio %in% c(1, 2, 4)) %>% 
+  distinct(context_freq, word, cost_ratio, cost, frequency) %>% 
+  ggplot(aes(x = word, y = cost, fill = frequency)) +
+  geom_bar(stat = "identity", width = .95) + 
+  scale_fill_manual(values = c("#440154FF", "#21908CFF")) +
+  facet_wrap(~cost_ratio) +
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggsave(here(write_plot_path, "cost_ratios.pdf"), height = 3, width = 10)
+```

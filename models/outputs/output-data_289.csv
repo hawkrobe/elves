@@ -1,0 +1,2 @@
+runNum,freq1,freq2,freq3,loc1,loc2,loc3,lf_cost,hf_cost,noise,test_angle,prob_word1,prob_word2,prob_word3
+289,HF,LF,HF,0,0.5,1,4,1,0.2,0.15,0.9397733800587341,0.06007770220615323,0.00014891773511261614
