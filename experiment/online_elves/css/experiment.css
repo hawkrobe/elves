@@ -1,0 +1,207 @@
+/* Experiment Styling */
+
+/* General page styling */
+body {
+  font-family: Arial, sans-serif;
+  background-color: #f5f5f5;
+  margin: 0;
+  padding: 20px;
+}
+
+/* Instruction text styling */
+.instruction-text {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  line-height: 1.6;
+  font-size: 18px;
+  color: #333;
+}
+
+/* Consent text styling */
+.consent-text {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 30px;
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  line-height: 1.8;
+  font-size: 16px;
+  color: #333;
+  text-align: left;
+}
+
+/* Button styling */
+.consent-button {
+  padding: 12px 30px;
+  margin: 10px;
+  font-size: 18px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.consent-button.agree {
+  background-color: #4CAF50;
+  color: white;
+}
+
+.consent-button.agree:hover {
+  background-color: #45a049;
+}
+
+.consent-button.disagree {
+  background-color: #f44336;
+  color: white;
+}
+
+.consent-button.disagree:hover {
+  background-color: #da190b;
+}
+
+/* Completion code styling */
+.completion-code {
+  font-size: 48px;
+  font-weight: bold;
+  color: #2196F3;
+  text-align: center;
+  padding: 20px;
+  background-color: #E3F2FD;
+  border: 3px solid #2196F3;
+  border-radius: 8px;
+  margin: 20px auto;
+  max-width: 500px;
+  letter-spacing: 4px;
+}
+
+.completion-instructions {
+  text-align: center;
+  font-size: 18px;
+  color: #666;
+  margin-top: 20px;
+}
+
+/* Survey form styling */
+.survey-question {
+  margin-bottom: 25px;
+}
+
+.survey-question label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: bold;
+  font-size: 16px;
+  color: #333;
+}
+
+.survey-question textarea {
+  width: 100%;
+  min-height: 100px;
+  padding: 10px;
+  font-size: 16px;
+  border: 2px solid #ddd;
+  border-radius: 4px;
+  font-family: Arial, sans-serif;
+  resize: vertical;
+}
+
+.survey-question textarea:focus {
+  outline: none;
+  border-color: #2196F3;
+}
+
+/* Prompt text styling */
+.prompt-text {
+  text-align: center;
+  font-size: 16px;
+  color: #666;
+  margin-top: 20px;
+  font-style: italic;
+}
+
+/* Center content */
+.centered-content {
+  text-align: center;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+/* Compass styling */
+.compass-container {
+  text-align: center;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.compass-wrapper {
+  display: inline-block;
+  margin: 20px 0;
+}
+
+.compass-circle {
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  border: 5px solid black;
+  background-color: white;
+  position: relative;
+  margin: 0 auto;
+}
+
+.compass-arrow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  margin-left: -10px;
+  margin-top: -142px;
+  /* Create arrow shape using CSS borders */
+  border-left: 10px solid transparent;
+  border-right: 10px solid transparent;
+  border-bottom: 142px solid black;
+  transform-origin: 50% 142px; /* Rotate around the base of the arrow */
+}
+
+.compass-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  margin-top: -10px;
+  border-radius: 50%;
+  background-color: black;
+  z-index: 10; /* Ensure center dot is above arrow */
+}
+
+.compass-instruction {
+  font-size: 20px;
+  margin: 20px 0;
+  font-weight: normal;
+}
+
+.compass-label {
+  font-size: 20px;
+  font-weight: bold;
+  color: #2196F3;
+}
+
+.compass-input {
+  font-size: 18px;
+  padding: 10px;
+  width: 200px;
+  text-align: center;
+  border: 2px solid #333;
+  border-radius: 4px;
+  margin: 20px auto;
+  display: block;
+}
+
