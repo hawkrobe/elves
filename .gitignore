@@ -41,3 +41,11 @@ vignettes/*.pdf
 ### R.Bookdown Stack ###
 # R package: bookdown caching files
 /*_files/
+
+### Prolific Info
+
+prolific_mapping.csv
+
+prolific_bonuses/
+
+inprog_*.csv
