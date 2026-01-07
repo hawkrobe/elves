@@ -133,7 +133,7 @@ d_production_cleaned <- d_production |>
 
 # Write to processed_data folder
 
-d_prolific_mapping 
+d_prolific_mapping |> write_csv(here(processed_data_path, "prolific_mapping.csv"))
 d_participants |> write_csv(here(processed_data_path, "participants.csv"))
 d_training |> write_csv(here(processed_data_path, "training.csv"))
 d_recall |> write_csv(here(processed_data_path, "recall.csv"))
