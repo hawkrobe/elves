@@ -61,12 +61,12 @@ def informativity(w, a, sigma):
 
 @jax.jit
 def voc_utility(w, a, t, sigma, baseline_hf, baseline_lf, drift_rate,
-                temperature, alpha, time_cost):
-    """Combined utility: α × informativity + activation."""
+                alpha, beta_cost):
+    """Utility = α × (informativity + β × activation)."""
     theta = a / (N_ANGLES - 1)
     info = informativity(w, a, sigma)
     act = activation(theta, w, t, sigma, baseline_hf, baseline_lf, drift_rate)
-    return jnp.exp((alpha * info + act) / temperature)
+    return jnp.exp(alpha * (info + beta_cost * act))
 
 
 @memo
@@ -80,13 +80,13 @@ def S1_race[a: Angle, t: Time, w: Word](sigma, baseline_hf, baseline_lf, drift_r
 
 
 @memo
-def S1_voc[a: Angle, w: Word](sigma, baseline_hf, baseline_lf, drift_rate, temperature, alpha, time_cost):
+def S1_voc[a: Angle, w: Word](sigma, baseline_hf, baseline_lf, drift_rate, alpha, beta_cost):
     """VOC speaker: P(w | θ) marginalized over deliberation time."""
     speaker: knows(a)
     speaker: chooses(t in Time, wpp=1.0)
     speaker: chooses(w in Word, wpp=voc_utility(
         w, a, t, sigma, baseline_hf, baseline_lf, drift_rate,
-        temperature, alpha, time_cost
+        alpha, beta_cost
     ))
     return Pr[speaker.w == w]
 
@@ -107,12 +107,11 @@ def predict_time_pressure(sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
 
 
 def predict_voc(sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
-                drift_rate=2.0, temperature=0.25, alpha=1.0, time_cost=0.1):
+                drift_rate=2.0, alpha=1.0, beta_cost=1.0):
     """VOC predictions: P(w | θ) marginalized over time."""
     pred = S1_voc(
         sigma=sigma, baseline_hf=baseline_hf, baseline_lf=baseline_lf,
-        drift_rate=drift_rate, temperature=temperature,
-        alpha=alpha, time_cost=time_cost
+        drift_rate=drift_rate, alpha=alpha, beta_cost=beta_cost
     )
     return {
         'predictions': pred,

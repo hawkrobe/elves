@@ -175,13 +175,13 @@ class TestVOC:
     def test_voc_output_shape(self):
         """S1_voc should return [N_ANGLES, N_WORDS] array."""
         pred = S1_voc(sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
-                      drift_rate=2.0, temperature=0.25, alpha=1.0, time_cost=0.1)
+                      drift_rate=2.0, alpha=1.0, beta_cost=1.0)
         assert pred.shape == (N_ANGLES, 3)
 
     def test_voc_probabilities_sum_to_one(self):
         """VOC probabilities should sum to 1."""
         pred = S1_voc(sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
-                      drift_rate=2.0, temperature=0.25, alpha=1.0, time_cost=0.1)
+                      drift_rate=2.0, alpha=1.0, beta_cost=1.0)
         sums = pred.sum(axis=1)
         assert jnp.allclose(sums, 1.0, atol=1e-5)
 
@@ -189,7 +189,7 @@ class TestVOC:
         """VOC model should predict high P(LF) at prototype."""
         results = predict_voc(
             sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
-            drift_rate=2.0, temperature=0.25, alpha=1.0, time_cost=0.1
+            drift_rate=2.0, alpha=1.0, beta_cost=1.0
         )
 
         prototype_idx = 50
