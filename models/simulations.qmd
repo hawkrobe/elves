@@ -15,12 +15,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 from rsa_race import (
-    predict_time_pressure,
-    activation,
-    semantic_match,
+    predict_retrieval_choice,
+    predict_fixed_resource,
+    model_comparison,
+    p_retrieved,
+    choice_probs,
+    informativity,
     N_ANGLES,
-    N_TIMES,
     WORD_LOCS,
+    Word,
 )
 
 plt.rcParams.update({
@@ -39,24 +42,24 @@ color_hf = '#7B7B7B'       # gray for HF
 color_lf = '#2E86AB'       # blue for LF
 
 # Model parameters
-sigma = 0.12
-baseline_hf = 0.4
-baseline_lf = 0.25
-drift_rate = 2.0
-temperature = 0.25
+sigma = 0.15
+alpha = 4.0
+lambda_lf = 0.3
+T_strict = 5.0
+T_lenient = 10.0
 ```
 
 ## Model Overview
 
-We model lexical choice as a race between competing words, where activation accumulates over time:
+We model lexical production as the combination of two independent processes:
 
-$$A(w, t) = B(w) + \delta \cdot M(\theta, w) \cdot t$$
+1. **Retrieval** (frequency-driven, θ-independent):
+$$P(\text{LF retrieved by } t) = 1 - e^{-\lambda t}$$
 
-- $B(w)$: baseline activation (higher for HF words)
-- $M(\theta, w)$: semantic match between target and word
-- $\delta$: drift rate
+2. **Choice** (informativity-driven, standard RSA):
+$$P(\text{choose } w \mid \theta, \text{available}) \propto \exp(\alpha \cdot \text{Info}(w \mid \theta))$$
 
-The key insight is that frequency effects are immediate, but semantic effects require time.
+The key insight: retrieval depends only on frequency, but choice depends on informativity. The interaction emerges because time pressure affects retrieval, which then modulates informativity-based choice.
 
 ```{python}
 #| label: fig-model-schematic
@@ -91,69 +94,50 @@ ax1.set_title('A. Word meanings', loc='left')
 ax1.set_yticks([])
 ax1.legend(loc='upper right', frameon=False, fontsize=7)
 
-# === Panel B: Activation trajectories ===
+# === Panel B: Retrieval probability over time ===
 ax2 = fig.add_subplot(1, 3, 2)
 
-# Compute activation trajectories at prototype (theta=0.5)
-# Use continuous time for smooth visualization
-times = np.linspace(0, 1.0, 100)
-theta_proto = 0.5
+times = np.linspace(0, 15, 100)
+p_ret = 1 - np.exp(-lambda_lf * times)
 
-# Activation = baseline + drift_rate * semantic_match * time
-# Compute semantic matches at prototype
-lf_sem_match = float(semantic_match(theta_proto, 1, sigma))  # LF at 0.5
-hf_sem_match = float(semantic_match(theta_proto, 0, sigma))  # HF at 0 (same as at 1)
+ax2.plot(times, p_ret, color=color_lf, lw=2.5, label='LF')
+ax2.axhline(1.0, color=color_hf, lw=2.5, ls='--', label='HF (always)')
 
-# Trajectories using continuous formula
-hf_traj = baseline_hf + drift_rate * hf_sem_match * times
-lf_traj = baseline_lf + drift_rate * lf_sem_match * times
+ax2.axvline(T_strict, color=color_strict, ls='-', lw=2, alpha=0.8)
+ax2.axvline(T_lenient, color=color_lenient, ls='-', lw=2, alpha=0.8)
 
-ax2.plot(times, hf_traj, color=color_hf, lw=2.5, ls='-', label='HF')
-ax2.plot(times, lf_traj, color=color_lf, lw=2.5, ls='-', label='LF')
-
-# Time pressure conditions (scaled to [0,1])
-t_strict = 0.8   # corresponds to time index 8
-t_lenient = 1.0  # corresponds to time index 10
-
-ax2.axvline(t_strict, color=color_strict, ls='-', lw=2, alpha=0.8)
-ax2.axvline(t_lenient, color=color_lenient, ls='-', lw=2, alpha=0.8)
-
-ax2.set_xlabel('Time')
-ax2.set_ylabel('Activation')
-ax2.set_title('B. Activation at prototype', loc='left')
-ax2.legend(loc='upper left', frameon=False, fontsize=8)
-ax2.set_xlim(0, 1.1)
-ax2.set_ylim(0, None)
+ax2.set_xlabel('Time (s)')
+ax2.set_ylabel('P(retrieved)')
+ax2.set_title('B. Retrieval dynamics', loc='left')
+ax2.legend(loc='lower right', frameon=False, fontsize=8)
+ax2.set_xlim(0, 15)
+ax2.set_ylim(0, 1.1)
 
 ymax = ax2.get_ylim()[1]
-ax2.text(t_strict + 0.02, ymax * 0.92, 'Strict\ndeadline',
-         color=color_strict, ha='left', fontsize=7, va='top')
-ax2.text(t_lenient + 0.02, ymax * 0.92, 'Lenient',
-         color=color_lenient, ha='left', fontsize=7, va='top')
+ax2.text(T_strict + 0.3, ymax * 0.85, 'Strict',
+         color=color_strict, ha='left', fontsize=8, va='top')
+ax2.text(T_lenient + 0.3, ymax * 0.85, 'Lenient',
+         color=color_lenient, ha='left', fontsize=8, va='top')
 
-# Annotation showing LF wins with time
-idx_late = 80
-ax2.annotate('', xy=(times[idx_late], lf_traj[idx_late]),
-             xytext=(times[idx_late], hf_traj[idx_late]),
-             arrowprops=dict(arrowstyle='<->', color='gray', lw=1))
-ax2.text(times[idx_late] + 0.05, (lf_traj[idx_late] + hf_traj[idx_late])/2,
-         'LF\nwins', fontsize=7, va='center')
+# Mark retrieval probabilities at deadlines
+p_strict = 1 - np.exp(-lambda_lf * T_strict)
+p_lenient = 1 - np.exp(-lambda_lf * T_lenient)
+ax2.plot(T_strict, p_strict, 'o', color=color_strict, markersize=8)
+ax2.plot(T_lenient, p_lenient, 'o', color=color_lenient, markersize=8)
 
 # === Panel C: P(LF) predictions ===
 ax3 = fig.add_subplot(1, 3, 3)
 
-results = predict_time_pressure(
-    sigma=sigma, baseline_hf=baseline_hf, baseline_lf=baseline_lf,
-    drift_rate=drift_rate, temperature=temperature,
-    time_strict=8, time_lenient=10
+results = predict_retrieval_choice(
+    sigma=sigma, alpha=alpha, lambda_lf=lambda_lf,
+    T_strict=T_strict, T_lenient=T_lenient
 )
 
 angles = np.array(results['angles'])
 distances_deg = np.abs(angles - 0.5) * 90  # distance from LF prototype in degrees
 
-# Get P(LF) = column 1 of predictions
-p_lenient = np.array(results['lenient'][:, 1])
-p_strict = np.array(results['strict'][:, 1])
+p_lenient = np.array(results['lenient'][:, Word.LF])
+p_strict = np.array(results['strict'][:, Word.LF])
 
 # Sort by distance for clean plotting
 sort_idx = np.argsort(distances_deg)
@@ -167,32 +151,21 @@ ax3.set_xlim(0, 45)
 ax3.set_ylim(0, 1)
 ax3.set_xlabel('Distance from LF (°)')
 ax3.set_ylabel('P(LF Response)')
-ax3.set_title('C. Resource-rational', loc='left')
+ax3.set_title('C. Retrieval × Choice', loc='left')
 ax3.legend(loc='lower left', frameon=False, fontsize=7)
 
-# === Inset: Fixed-budget model ===
+# === Inset: Fixed-resource model (no interaction) ===
 ax_inset = ax3.inset_axes([0.58, 0.48, 0.38, 0.38])
 
-def fixed_budget_p_lf(distances, shift=0):
-    positions = 0.5 - distances / 90
+# Fixed model with matched retrieval probabilities
+pred_fixed_high = predict_fixed_resource(sigma=sigma, alpha=alpha, p_retrieve_fixed=p_lenient[50])
+pred_fixed_low = predict_fixed_resource(sigma=sigma, alpha=alpha, p_retrieve_fixed=p_strict[50])
 
-    lf_match = norm.pdf(positions, loc=0.5, scale=sigma)
-    lf_match = lf_match / lf_match.max()
-    hf_match = (norm.pdf(positions, loc=0, scale=sigma) +
-                norm.pdf(positions, loc=1, scale=sigma)) / 2
-    hf_match = hf_match / norm.pdf(0, loc=0, scale=sigma)
+fixed_lenient = np.array(pred_fixed_high['predictions'][:, Word.LF])
+fixed_strict = np.array(pred_fixed_low['predictions'][:, Word.LF])
 
-    lf_score = lf_match * 0.4
-    hf_score = hf_match * 0.7
-
-    log_odds = np.log(lf_score / hf_score) + shift
-    return 1 / (1 + np.exp(-log_odds))
-
-fixed_lenient = fixed_budget_p_lf(unique_dist, shift=0.3)
-fixed_strict = fixed_budget_p_lf(unique_dist, shift=-0.3)
-
-ax_inset.plot(unique_dist, fixed_lenient, color=color_lenient, lw=1.5)
-ax_inset.plot(unique_dist, fixed_strict, color=color_strict, lw=1.5)
+ax_inset.plot(unique_dist, fixed_lenient[sort_idx], color=color_lenient, lw=1.5)
+ax_inset.plot(unique_dist, fixed_strict[sort_idx], color=color_strict, lw=1.5)
 ax_inset.set_xlim(0, 45)
 ax_inset.set_ylim(0, 1)
 ax_inset.set_xticks([])

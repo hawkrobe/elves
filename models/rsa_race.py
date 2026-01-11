@@ -1,20 +1,19 @@
 """
-RSA with race model retrieval dynamics.
+RSA with frequency-driven retrieval.
 
-Activation(w, t) = baseline(w) + drift × semantic_match(θ, w) × t
+Retrieval: P(LF retrieved by t) = 1 - exp(-λt)  [frequency-driven, θ-independent]
+Choice: P(w | θ, available) ∝ exp(α × Info(w | θ))  [standard RSA]
+Production: P(LF | θ, T) = P(retrieved) × P(choose LF | all available)
 """
 
-from memo import memo
 import jax
 import jax.numpy as jnp
 from jax.scipy.stats import norm
 from enum import IntEnum
 
 N_ANGLES = 101
-N_TIMES = 11
 
-Angle = jnp.arange(N_ANGLES)
-Time = jnp.arange(N_TIMES)
+Angle = jnp.linspace(0, 1, N_ANGLES)
 
 class Word(IntEnum):
     HF1 = 0
@@ -22,98 +21,159 @@ class Word(IntEnum):
     HF2 = 2
 
 WORD_LOCS = jnp.array([0.0, 0.5, 1.0])
-WORD_FREQ = jnp.array([1, 0, 1])  # 1 = HF, 0 = LF
+
+
+# =============================================================================
+# Retrieval (frequency-driven, θ-independent)
+# =============================================================================
+
+@jax.jit
+def p_retrieved(t, lambda_lf):
+    """P(LF retrieved by time t) = 1 - exp(-λt). HF always available."""
+    return 1.0 - jnp.exp(-lambda_lf * t)
+
+
+# =============================================================================
+# Informativity (standard RSA)
+# =============================================================================
+
+@jax.jit
+def informativity(theta, w, sigma):
+    """Info(w | θ) = log N(θ | μ_w, σ)"""
+    return jnp.log(norm.pdf(theta, loc=WORD_LOCS[w], scale=sigma) + 1e-10)
 
 
 @jax.jit
-def semantic_match(theta, w, sigma):
-    """Gaussian semantic match between target θ and word w, normalized to [0, 1]."""
-    loc = WORD_LOCS[w]
-    match = norm.pdf(theta, loc=loc, scale=sigma)
-    max_match = norm.pdf(0.0, loc=0.0, scale=sigma)
-    return match / max_match
+def choice_probs(theta, sigma, alpha):
+    """P(choose w | θ, all available) ∝ exp(α × Info(w | θ))"""
+    info = jnp.array([informativity(theta, w, sigma) for w in Word])
+    log_probs = alpha * info
+    log_probs = log_probs - jax.scipy.special.logsumexp(log_probs)
+    return jnp.exp(log_probs)
 
 
 @jax.jit
-def activation(theta, w, t, sigma, baseline_hf, baseline_lf, drift_rate):
-    """Activation(w, t) = baseline(w) + drift × semantic_match(θ, w) × t"""
-    baseline = jnp.where(WORD_FREQ[w] == 1, baseline_hf, baseline_lf)
-    sem_match = semantic_match(theta, w, sigma)
-    time_scaled = t / (N_TIMES - 1)
-    return baseline + drift_rate * sem_match * time_scaled
+def nearest_hf(theta):
+    """Returns probability distribution over words when only HF available."""
+    # Deterministically choose nearest HF
+    p_hf1 = (theta < 0.5).astype(float)
+    p_hf2 = (theta >= 0.5).astype(float)
+    return jnp.array([p_hf1, 0.0, p_hf2])
+
+
+# =============================================================================
+# Production Models
+# =============================================================================
+
+@jax.jit
+def retrieval_choice_model(theta, sigma, alpha, lambda_lf, T):
+    """
+    Full model: retrieval × choice.
+
+    P(w | θ, T) = P(LF retrieved) × P(choose w | all available)
+                + P(LF not retrieved) × P(choose w | only HF)
+    """
+    p_ret = p_retrieved(T, lambda_lf)
+    p_choice = choice_probs(theta, sigma, alpha)
+    p_hf_only = nearest_hf(theta)
+
+    return p_ret * p_choice + (1 - p_ret) * p_hf_only
 
 
 @jax.jit
-def retrieval_utility(w, a, t, sigma, baseline_hf, baseline_lf, drift_rate, temperature):
-    """Softmax utility for word selection based on activation."""
-    theta = a / (N_ANGLES - 1)
-    act = activation(theta, w, t, sigma, baseline_hf, baseline_lf, drift_rate)
-    return jnp.exp(act / temperature)
+def fixed_resource_model(theta, sigma, alpha, p_retrieve_fixed):
+    """
+    Fixed retrieval probability (no time/deadline sensitivity).
+    Predicts main effect of frequency but NO interaction with position.
+    """
+    p_choice = choice_probs(theta, sigma, alpha)
+    p_hf_only = nearest_hf(theta)
+
+    return p_retrieve_fixed * p_choice + (1 - p_retrieve_fixed) * p_hf_only
 
 
 @jax.jit
-def informativity(w, a, sigma):
-    """Log probability that literal listener recovers θ from word w."""
-    theta = a / (N_ANGLES - 1)
-    log_L0 = jnp.log(norm.pdf(theta, loc=WORD_LOCS[w], scale=sigma) + 1e-10)
-    return log_L0
+def informativity_only_model(theta, sigma, alpha):
+    """
+    No retrieval cost, just softmax over informativity.
+    Predicts no frequency effect.
+    """
+    return choice_probs(theta, sigma, alpha)
 
 
-@jax.jit
-def voc_utility(w, a, t, sigma, baseline_hf, baseline_lf, drift_rate,
-                alpha, beta_cost):
-    """Utility = α × (informativity + β × activation)."""
-    theta = a / (N_ANGLES - 1)
-    info = informativity(w, a, sigma)
-    act = activation(theta, w, t, sigma, baseline_hf, baseline_lf, drift_rate)
-    return jnp.exp(alpha * (info + beta_cost * act))
+# =============================================================================
+# Vectorized prediction functions
+# =============================================================================
 
+def predict_retrieval_choice(sigma=0.15, alpha=4.0, lambda_lf=0.3,
+                              T_strict=5.0, T_lenient=10.0):
+    """Generate predictions for strict vs lenient deadline."""
+    angles = jnp.linspace(0, 1, N_ANGLES)
 
-@memo
-def S1_race[a: Angle, t: Time, w: Word](sigma, baseline_hf, baseline_lf, drift_rate, temperature):
-    """Race model speaker: P(w | θ, t) from activation dynamics."""
-    speaker: knows(a, t)
-    speaker: chooses(w in Word, wpp=retrieval_utility(
-        w, a, t, sigma, baseline_hf, baseline_lf, drift_rate, temperature
-    ))
-    return Pr[speaker.w == w]
+    # Vectorize over angles
+    pred_fn = jax.vmap(lambda th: retrieval_choice_model(th, sigma, alpha, lambda_lf, T_strict))
+    pred_strict = pred_fn(angles)
 
+    pred_fn = jax.vmap(lambda th: retrieval_choice_model(th, sigma, alpha, lambda_lf, T_lenient))
+    pred_lenient = pred_fn(angles)
 
-@memo
-def S1_voc[a: Angle, w: Word](sigma, baseline_hf, baseline_lf, drift_rate, alpha, beta_cost):
-    """VOC speaker: P(w | θ) marginalized over deliberation time."""
-    speaker: knows(a)
-    speaker: chooses(t in Time, wpp=1.0)
-    speaker: chooses(w in Word, wpp=voc_utility(
-        w, a, t, sigma, baseline_hf, baseline_lf, drift_rate,
-        alpha, beta_cost
-    ))
-    return Pr[speaker.w == w]
-
-
-def predict_time_pressure(sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
-                          drift_rate=2.0, temperature=0.25,
-                          time_strict=8, time_lenient=10):
-    """Predictions for strict vs lenient time pressure conditions."""
-    all_preds = S1_race(
-        sigma=sigma, baseline_hf=baseline_hf,
-        baseline_lf=baseline_lf, drift_rate=drift_rate, temperature=temperature
-    )
     return {
-        'strict': all_preds[:, time_strict, :],
-        'lenient': all_preds[:, time_lenient, :],
-        'angles': jnp.linspace(0, 1, N_ANGLES),
+        'strict': pred_strict,
+        'lenient': pred_lenient,
+        'angles': angles,
+        'p_retrieved_strict': float(p_retrieved(T_strict, lambda_lf)),
+        'p_retrieved_lenient': float(p_retrieved(T_lenient, lambda_lf)),
     }
 
 
-def predict_voc(sigma=0.12, baseline_hf=0.4, baseline_lf=0.25,
-                drift_rate=2.0, alpha=1.0, beta_cost=1.0):
-    """VOC predictions: P(w | θ) marginalized over time."""
-    pred = S1_voc(
-        sigma=sigma, baseline_hf=baseline_hf, baseline_lf=baseline_lf,
-        drift_rate=drift_rate, alpha=alpha, beta_cost=beta_cost
-    )
+def predict_fixed_resource(sigma=0.15, alpha=4.0, p_retrieve_fixed=0.7):
+    """Generate predictions for fixed resource model."""
+    angles = jnp.linspace(0, 1, N_ANGLES)
+    pred_fn = jax.vmap(lambda th: fixed_resource_model(th, sigma, alpha, p_retrieve_fixed))
+
     return {
-        'predictions': pred,
-        'angles': jnp.linspace(0, 1, N_ANGLES),
+        'predictions': pred_fn(angles),
+        'angles': angles,
+    }
+
+
+def predict_informativity_only(sigma=0.15, alpha=4.0):
+    """Generate predictions for informativity-only model."""
+    angles = jnp.linspace(0, 1, N_ANGLES)
+    pred_fn = jax.vmap(lambda th: informativity_only_model(th, sigma, alpha))
+
+    return {
+        'predictions': pred_fn(angles),
+        'angles': angles,
+    }
+
+
+def predict_frequency_manipulation(sigma=0.15, alpha=4.0, T=10.0,
+                                    lambda_1to2=0.5, lambda_1to4=0.2):
+    """Compare different frequency ratios (λ values)."""
+    angles = jnp.linspace(0, 1, N_ANGLES)
+
+    pred_fn_1to2 = jax.vmap(lambda th: retrieval_choice_model(th, sigma, alpha, lambda_1to2, T))
+    pred_fn_1to4 = jax.vmap(lambda th: retrieval_choice_model(th, sigma, alpha, lambda_1to4, T))
+
+    return {
+        'ratio_1to2': pred_fn_1to2(angles),
+        'ratio_1to4': pred_fn_1to4(angles),
+        'angles': angles,
+    }
+
+
+def model_comparison(sigma=0.15, alpha=4.0, lambda_lf=0.3, T=10.0, p_fixed=0.7):
+    """Compare all three models."""
+    angles = jnp.linspace(0, 1, N_ANGLES)
+
+    pred_retrieval = jax.vmap(lambda th: retrieval_choice_model(th, sigma, alpha, lambda_lf, T))(angles)
+    pred_fixed = jax.vmap(lambda th: fixed_resource_model(th, sigma, alpha, p_fixed))(angles)
+    pred_info = jax.vmap(lambda th: informativity_only_model(th, sigma, alpha))(angles)
+
+    return {
+        'retrieval_choice': pred_retrieval,
+        'fixed_resource': pred_fixed,
+        'informativity_only': pred_info,
+        'angles': angles,
     }
