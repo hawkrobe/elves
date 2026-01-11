@@ -177,3 +177,135 @@ def model_comparison(sigma=0.15, alpha=4.0, lambda_lf=0.3, T=10.0, p_fixed=0.7):
         'informativity_only': pred_info,
         'angles': angles,
     }
+
+
+# =============================================================================
+# VOC: Value of Computation (Optimal Stopping)
+# =============================================================================
+
+@jax.jit
+def expected_utility_all_available(theta, sigma, alpha):
+    """E[Info(w | θ)] when all words available, choosing by RSA."""
+    probs = choice_probs(theta, sigma, alpha)
+    info = jnp.array([informativity(theta, w, sigma) for w in Word])
+    return jnp.sum(probs * info)
+
+
+@jax.jit
+def utility_hf_only(theta, sigma):
+    """Utility of responding with nearest HF (deterministic)."""
+    # nearest HF
+    hf_idx = jnp.where(theta < 0.5, Word.HF1, Word.HF2)
+    return informativity(theta, hf_idx, sigma)
+
+
+@jax.jit
+def benefit_of_lf(theta, sigma, alpha):
+    """
+    Improvement in expected utility if LF becomes available.
+
+    benefit(θ) = E[Info | all available] - Info(nearest HF | θ)
+
+    High at prototype (LF much better than HF).
+    Low at boundary (LF only marginally better).
+    """
+    eu_all = expected_utility_all_available(theta, sigma, alpha)
+    eu_hf = utility_hf_only(theta, sigma)
+    return eu_all - eu_hf
+
+
+@jax.jit
+def optimal_stopping_time(theta, sigma, alpha, lambda_lf, cost):
+    """
+    Optimal time to stop waiting for LF.
+
+    Stop when: marginal cost ≥ marginal benefit
+    i.e., when: c ≥ λ × P(not yet retrieved) × benefit(θ)
+
+    For exponential retrieval, this gives:
+    t* = (1/λ) × log(λ × benefit(θ) / c)  [if benefit > c/λ, else t*=0]
+    """
+    benefit = benefit_of_lf(theta, sigma, alpha)
+
+    # If benefit is low enough, respond immediately
+    # Otherwise, wait until marginal benefit = marginal cost
+    # Marginal benefit at time t: λ × exp(-λt) × benefit
+    # Set equal to c: λ × exp(-λt) × benefit = c
+    # Solve: t = (1/λ) × log(λ × benefit / c)
+
+    threshold = cost / lambda_lf
+    t_star = jnp.where(
+        benefit > threshold,
+        (1.0 / lambda_lf) * jnp.log(lambda_lf * benefit / cost),
+        0.0
+    )
+    return jnp.maximum(t_star, 0.0)
+
+
+@jax.jit
+def voc_model(theta, sigma, alpha, lambda_lf, cost, T_max):
+    """
+    VOC model: speaker chooses optimal stopping time, capped by deadline.
+
+    Returns P(w | θ) under optimal stopping.
+    """
+    # Optimal stopping time (unconstrained)
+    t_star = optimal_stopping_time(theta, sigma, alpha, lambda_lf, cost)
+
+    # Actual response time is min(t_star, T_max)
+    t_respond = jnp.minimum(t_star, T_max)
+
+    # Production probabilities at response time
+    return retrieval_choice_model(theta, sigma, alpha, lambda_lf, t_respond)
+
+
+@jax.jit
+def voc_response_time(theta, sigma, alpha, lambda_lf, cost, T_max):
+    """Returns the optimal response time (capped by deadline)."""
+    t_star = optimal_stopping_time(theta, sigma, alpha, lambda_lf, cost)
+    return jnp.minimum(t_star, T_max)
+
+
+def predict_voc(sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1, T_max=15.0):
+    """
+    Generate VOC model predictions.
+
+    Returns word probabilities and response times across positions.
+    """
+    angles = jnp.linspace(0, 1, N_ANGLES)
+
+    pred_fn = jax.vmap(lambda th: voc_model(th, sigma, alpha, lambda_lf, cost, T_max))
+    rt_fn = jax.vmap(lambda th: voc_response_time(th, sigma, alpha, lambda_lf, cost, T_max))
+    benefit_fn = jax.vmap(lambda th: benefit_of_lf(th, sigma, alpha))
+
+    return {
+        'predictions': pred_fn(angles),
+        'response_times': rt_fn(angles),
+        'benefit': benefit_fn(angles),
+        'angles': angles,
+    }
+
+
+def predict_voc_deadline_comparison(sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1,
+                                     T_strict=5.0, T_lenient=15.0):
+    """
+    Compare VOC model under different deadlines.
+
+    Key prediction: Response times should be faster at boundaries
+    (low benefit of waiting) than at prototypes (high benefit).
+    """
+    angles = jnp.linspace(0, 1, N_ANGLES)
+
+    pred_strict = jax.vmap(lambda th: voc_model(th, sigma, alpha, lambda_lf, cost, T_strict))(angles)
+    pred_lenient = jax.vmap(lambda th: voc_model(th, sigma, alpha, lambda_lf, cost, T_lenient))(angles)
+
+    rt_strict = jax.vmap(lambda th: voc_response_time(th, sigma, alpha, lambda_lf, cost, T_strict))(angles)
+    rt_lenient = jax.vmap(lambda th: voc_response_time(th, sigma, alpha, lambda_lf, cost, T_lenient))(angles)
+
+    return {
+        'strict': pred_strict,
+        'lenient': pred_lenient,
+        'rt_strict': rt_strict,
+        'rt_lenient': rt_lenient,
+        'angles': angles,
+    }

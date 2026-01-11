@@ -16,6 +16,11 @@ from rsa_race import (
     predict_retrieval_choice,
     predict_fixed_resource,
     model_comparison,
+    benefit_of_lf,
+    optimal_stopping_time,
+    voc_model,
+    voc_response_time,
+    predict_voc,
     N_ANGLES,
     WORD_LOCS,
     Word,
@@ -244,3 +249,59 @@ class TestEdgeCases:
         # With LF never retrieved, should get HF2 (nearest to 0.5)
         assert float(probs[Word.LF]) == pytest.approx(0.0)
         assert float(probs[Word.HF2]) == pytest.approx(1.0)
+
+
+class TestVOC:
+    """Tests for Value of Computation (optimal stopping) model."""
+
+    def test_benefit_higher_at_prototype(self):
+        """Benefit of LF should be higher at prototype than boundary."""
+        benefit_proto = float(benefit_of_lf(0.5, sigma=0.15, alpha=4.0))
+        benefit_boundary = float(benefit_of_lf(0.25, sigma=0.15, alpha=4.0))
+        assert benefit_proto > benefit_boundary
+
+    def test_benefit_positive_at_prototype(self):
+        """Benefit should be positive at LF prototype."""
+        benefit = float(benefit_of_lf(0.5, sigma=0.15, alpha=4.0))
+        assert benefit > 0
+
+    def test_stopping_time_longer_at_prototype(self):
+        """Should wait longer at prototype (high benefit) than boundary."""
+        t_proto = float(optimal_stopping_time(0.5, sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1))
+        t_boundary = float(optimal_stopping_time(0.25, sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1))
+        assert t_proto > t_boundary
+
+    def test_higher_cost_reduces_waiting(self):
+        """Higher cost should reduce optimal stopping time."""
+        t_low_cost = float(optimal_stopping_time(0.5, sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.05))
+        t_high_cost = float(optimal_stopping_time(0.5, sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.5))
+        assert t_low_cost > t_high_cost
+
+    def test_voc_probs_sum_to_one(self):
+        """VOC model probabilities should sum to 1."""
+        probs = voc_model(0.5, sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1, T_max=15.0)
+        assert float(jnp.sum(probs)) == pytest.approx(1.0)
+
+    def test_voc_response_time_capped_by_deadline(self):
+        """Response time should be capped by deadline."""
+        rt = float(voc_response_time(0.5, sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.01, T_max=5.0))
+        assert rt <= 5.0
+
+    def test_voc_rt_varies_with_position(self):
+        """Response times should vary with position."""
+        results = predict_voc(sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1, T_max=15.0)
+
+        rt_proto = float(results['response_times'][50])  # θ = 0.5
+        rt_boundary = float(results['response_times'][25])  # θ = 0.25
+
+        # Should wait longer at prototype
+        assert rt_proto > rt_boundary
+
+    def test_voc_lf_higher_at_prototype(self):
+        """P(LF) should still be higher at prototype under VOC."""
+        results = predict_voc(sigma=0.15, alpha=4.0, lambda_lf=0.3, cost=0.1, T_max=15.0)
+
+        p_lf_proto = float(results['predictions'][50, Word.LF])
+        p_lf_boundary = float(results['predictions'][25, Word.LF])
+
+        assert p_lf_proto > p_lf_boundary
