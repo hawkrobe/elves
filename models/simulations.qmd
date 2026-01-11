@@ -178,3 +178,250 @@ fig.savefig('../latex/figures/model_schematic.pdf', bbox_inches='tight')
 fig.savefig('../latex/figures/model_schematic.png', bbox_inches='tight', dpi=300)
 plt.show()
 ```
+
+## Response Time Predictions
+
+The resource-rational framework makes predictions not just about *what* word speakers choose, but also about *how long* they take to respond. The key insight is that speakers should invest more time when the benefit of waiting for LF retrieval is high.
+
+### Value of Computation
+
+The **benefit of LF** at position θ is the difference in expected reward between having LF available versus only having HF:
+
+$$\text{Benefit}(\theta) = \max(0, R(\text{LF}, \theta) - R(\text{HF}_{\text{nearest}}, \theta))$$
+
+With the experiment's linear reward structure (points decrease linearly with angular distance from target), this benefit:
+
+- Is **maximal at the LF prototype** (θ = 0.5)
+- **Drops to zero at the category boundary** (22.5° from LF)
+- **Remains zero in the HF-target region**
+
+```{python}
+#| label: fig-benefit-of-lf
+#| fig-cap: "Benefit of LF retrieval as a function of target position"
+
+def benefit_of_lf_linear(dist_from_lf_deg):
+    """Benefit of LF under linear reward structure."""
+    reward_lf = np.maximum(0, 1 - dist_from_lf_deg / 45)
+    reward_hf = np.maximum(0, 1 - (45 - dist_from_lf_deg) / 45)
+    return np.maximum(0, reward_lf - reward_hf)
+
+dist_smooth = np.linspace(0, 45, 200)
+benefit = benefit_of_lf_linear(dist_smooth)
+
+fig, ax = plt.subplots(figsize=(6, 3.5))
+ax.plot(dist_smooth, benefit, 'k-', lw=2.5)
+ax.fill_between(dist_smooth, 0, benefit, alpha=0.15, color='blue')
+ax.axvline(22.5, color='gray', ls='--', lw=1.5, alpha=0.7, label='Category boundary')
+
+ax.annotate('High benefit\n→ wait for LF', xy=(5, 0.7), fontsize=9, ha='center')
+ax.annotate('Zero benefit\n→ respond with HF', xy=(35, 0.15), fontsize=9, ha='center')
+
+ax.set_xlabel('Distance from LF (°)')
+ax.set_ylabel('Benefit of LF')
+ax.set_title('Value of Waiting for LF Retrieval')
+ax.set_xlim(0, 45)
+ax.set_ylim(0, 1.1)
+ax.legend(loc='upper right', frameon=False)
+
+plt.tight_layout()
+plt.show()
+```
+
+### Empirical RT Pattern
+
+The resource-rational analysis predicts that speakers should adopt a simple **categorical heuristic**: wait longer when LF is the target (benefit > 0), respond quickly when HF is the target (benefit = 0). This predicts a **step function** in RT at the category boundary.
+
+```{python}
+#| label: fig-rt-step
+#| fig-cap: "Response time shows a step function at the category boundary"
+
+import pandas as pd
+from scipy import stats
+from scipy.optimize import minimize
+
+# Load empirical data
+production = pd.read_csv('../data/full-production/processed_data/production.csv')
+participants = pd.read_csv('../data/full-production/processed_data/participants.csv')
+
+df = production.merge(
+    participants[['subject_id', 'time_pressure', 'frequency_ratio']],
+    on='subject_id'
+)
+
+# Compute distance to LF
+df['dist_to_lf_deg'] = np.where(
+    df['nearestFreq'] == 'LF',
+    np.abs(df['distance']),
+    np.abs(df['targetAngle'] - df['nextNearestAngle'])
+)
+df['dist_to_lf_deg'] = np.where(
+    df['dist_to_lf_deg'] > 180,
+    360 - df['dist_to_lf_deg'],
+    df['dist_to_lf_deg']
+)
+
+# Filter
+df = df[df['between_freqs'] == True]
+df = df[df['timed_out'] == 0]
+df = df[(df['rt'] > 200) & (df['rt'] < df['time_pressure'] * 1000)]
+
+# Fit models on raw data
+def fit_models_raw(subset):
+    distances = subset['dist_to_lf_deg'].values
+    rts = subset['rt'].values
+
+    results = {}
+    ss_tot = np.sum((rts - rts.mean())**2)
+
+    # Step model (boundary fixed at 22.5°)
+    rt_lf = rts[distances < 22.5].mean()
+    rt_hf = rts[distances >= 22.5].mean()
+    step_pred = np.where(distances < 22.5, rt_lf, rt_hf)
+    ss_res = np.sum((rts - step_pred)**2)
+    step_r2 = 1 - ss_res / ss_tot
+    results['step'] = {'rt_lf': rt_lf, 'rt_hf': rt_hf, 'r2': step_r2}
+
+    # Linear model
+    slope, intercept, r, p, se = stats.linregress(distances, rts)
+    results['linear'] = {'intercept': intercept, 'slope': slope, 'r2': r**2}
+
+    # VOC model: RT = rt_min + rt_range * benefit^power
+    def benefit(dist):
+        return np.maximum(0, 1 - 2 * dist / 45)
+
+    def voc_loss(params):
+        rt_min, rt_range, power = params
+        if power <= 0 or rt_range < 0:
+            return 1e10
+        pred = rt_min + rt_range * np.power(benefit(distances) + 1e-6, power)
+        return np.sum((rts - pred)**2)
+
+    x0 = [rts.min(), rts.max() - rts.min(), 0.3]
+    bounds = [(0, 10000), (0, 5000), (0.01, 5.0)]
+    result = minimize(voc_loss, x0, bounds=bounds, method='L-BFGS-B')
+    rt_min, rt_range, power = result.x
+
+    voc_pred = rt_min + rt_range * np.power(benefit(distances) + 1e-6, power)
+    voc_r2 = 1 - np.sum((rts - voc_pred)**2) / ss_tot
+    results['voc'] = {'rt_min': rt_min, 'rt_range': rt_range, 'power': power, 'r2': voc_r2}
+
+    results['n'] = len(rts)
+    results['ss_tot'] = ss_tot
+
+    return results
+
+# Plot
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+colors = {5: color_strict, 10: color_lenient}
+labels = {5: 'Strict (5s)', 10: 'Lenient (10s)'}
+n_bins = 15
+
+for idx, tp in enumerate([5, 10]):
+    subset = df[df['time_pressure'] == tp]
+    results = fit_models_raw(subset)
+
+    # Binned data for visualization
+    binned = subset.groupby(pd.cut(subset['dist_to_lf_deg'], bins=n_bins), observed=True).agg({
+        'rt': ['mean', 'sem'],
+        'dist_to_lf_deg': 'mean'
+    })
+    binned.columns = ['rt_mean', 'rt_se', 'dist_mean']
+    binned = binned.dropna()
+
+    ax = axes[idx]
+
+    # Data points
+    ax.errorbar(binned['dist_mean'], binned['rt_mean']/1000,
+               yerr=binned['rt_se']/1000,
+               marker='o', color=colors[tp], linewidth=0, markersize=6,
+               capsize=2, label='Data', zorder=3)
+
+    # Step model
+    dist_smooth = np.linspace(0, 45, 200)
+    step_pred = np.where(dist_smooth < 22.5, results['step']['rt_lf'], results['step']['rt_hf'])
+    ax.plot(dist_smooth, step_pred/1000, 'k-', linewidth=2.5,
+            label=f'Step (R²={results["step"]["r2"]:.4f})', zorder=2)
+
+    # Linear model
+    lin_pred = results['linear']['intercept'] + results['linear']['slope'] * dist_smooth
+    ax.plot(dist_smooth, lin_pred/1000, '--', color='gray', linewidth=2,
+            label=f'Linear (R²={results["linear"]["r2"]:.4f})', zorder=1)
+
+    # VOC model
+    benefit_smooth = np.maximum(0, 1 - 2 * dist_smooth / 45)
+    voc_pred = results['voc']['rt_min'] + results['voc']['rt_range'] * np.power(benefit_smooth + 1e-6, results['voc']['power'])
+    ax.plot(dist_smooth, voc_pred/1000, ':', color='purple', linewidth=2,
+            label=f'VOC (R²={results["voc"]["r2"]:.4f})', zorder=1)
+
+    ax.axvline(22.5, color='gray', ls='--', lw=1, alpha=0.5)
+    ax.set_xlabel('Distance from LF (°)')
+    ax.set_ylabel('Mean RT (s)')
+    ax.set_title(f'{labels[tp]} (n={results["n"]:,})')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.set_xlim(0, 45)
+
+    # Step annotation
+    step_diff = results['step']['rt_lf'] - results['step']['rt_hf']
+    ax.annotate(f'Δ = {step_diff:.0f}ms',
+               xy=(22.5, (results['step']['rt_lf'] + results['step']['rt_hf'])/2000),
+               xytext=(32, (results['step']['rt_lf'] + results['step']['rt_hf'])/2000),
+               fontsize=9, ha='left',
+               arrowprops=dict(arrowstyle='->', color='black', lw=1))
+
+plt.tight_layout()
+fig.savefig('../latex/figures/rt_step_comparison.pdf', bbox_inches='tight')
+fig.savefig('../latex/figures/rt_step_comparison.png', bbox_inches='tight', dpi=300)
+plt.show()
+```
+
+### Model Comparison
+
+We compare three models of the RT pattern, fitted on raw trial-level data:
+
+1. **Step model** (2 parameters): RT = RT_LF if distance < 22.5°, else RT_HF
+2. **Linear model** (2 parameters): RT = intercept + slope × distance
+3. **VOC model** (3 parameters): RT = rt_min + rt_range × benefit^power
+
+```{python}
+#| label: tbl-rt-model-comparison
+#| tbl-cap: "Model comparison for RT patterns (fitted on raw trial-level data)"
+
+def compute_bic(r2, ss_tot, n, k):
+    ss_res = (1 - r2) * ss_tot
+    return n * np.log(ss_res / n) + k * np.log(n)
+
+print("="*70)
+print("RT MODEL COMPARISON")
+print("="*70)
+
+for tp in [5, 10]:
+    subset = df[df['time_pressure'] == tp]
+    results = fit_models_raw(subset)
+    n = results['n']
+    ss_tot = results['ss_tot']
+
+    bic_step = compute_bic(results['step']['r2'], ss_tot, n, 2)
+    bic_lin = compute_bic(results['linear']['r2'], ss_tot, n, 2)
+    bic_voc = compute_bic(results['voc']['r2'], ss_tot, n, 3)
+
+    print(f"\n{labels[tp]} (n={n:,}):")
+    print(f"  Step:   R² = {results['step']['r2']:.4f}, BIC = {bic_step:,.0f}")
+    print(f"  Linear: R² = {results['linear']['r2']:.4f}, BIC = {bic_lin:,.0f}")
+    print(f"  VOC:    R² = {results['voc']['r2']:.4f}, BIC = {bic_voc:,.0f}")
+
+    bics = {'Step': bic_step, 'Linear': bic_lin, 'VOC': bic_voc}
+    print(f"  → Best model (lowest BIC): {min(bics, key=bics.get)}")
+    print(f"  → Step size: {results['step']['rt_lf'] - results['step']['rt_hf']:.0f}ms")
+```
+
+### Resource-Rational Interpretation
+
+The step model wins by BIC despite having fewer parameters than the VOC model. Critically, this is not evidence *against* resource-rationality—it is exactly what resource-rationality predicts.
+
+The resource-rational framework (Lieder & Griffiths, 2020) argues that people use **heuristics that approximate optimal behavior** given the cost of computation. The analysis shows:
+
+1. **The VOC curve** identifies where the benefit of waiting drops to zero (at 22.5°)
+2. **The optimal heuristic** given this structure is: "Is LF the target? If yes, wait; if no, respond fast"
+3. **This simple categorical rule** approximates the full VOC computation with minimal cognitive cost
+
+Speakers don't need to continuously compute the graded benefit of LF—they just need to track which word is closer to the target, which they're already doing for the production task. The resource-rational framework *derives* this heuristic as optimal, rather than treating it as an ad-hoc departure from rationality.
