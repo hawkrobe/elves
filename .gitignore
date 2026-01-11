@@ -49,3 +49,15 @@ prolific_mapping.csv
 prolific_bonuses/
 
 inprog_*.csv
+
+### LaTeX ###
+latex/
+
+### Python ###
+__pycache__/
+*.pyc
+.pytest_cache/
+
+### Quarto ###
+*_files/
+*.html

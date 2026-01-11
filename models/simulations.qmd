@@ -1,0 +1,207 @@
+---
+title: "Model Simulations"
+format:
+  html:
+    code-fold: true
+jupyter: python3
+---
+
+```{python}
+#| label: setup
+#| message: false
+
+import jax.numpy as jnp
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+from rsa_race import (
+    predict_time_pressure,
+    activation,
+    semantic_match,
+    N_ANGLES,
+    N_TIMES,
+    WORD_LOCS,
+)
+
+plt.rcParams.update({
+    'font.family': 'sans-serif',
+    'font.size': 9,
+    'axes.labelsize': 10,
+    'axes.titlesize': 11,
+    'legend.fontsize': 8,
+    'figure.dpi': 150,
+})
+
+# Colors
+color_strict = '#E94F37'   # red for strict
+color_lenient = '#2E86AB'  # blue for lenient
+color_hf = '#7B7B7B'       # gray for HF
+color_lf = '#2E86AB'       # blue for LF
+
+# Model parameters
+sigma = 0.12
+baseline_hf = 0.4
+baseline_lf = 0.25
+drift_rate = 2.0
+temperature = 0.25
+```
+
+## Model Overview
+
+We model lexical choice as a race between competing words, where activation accumulates over time:
+
+$$A(w, t) = B(w) + \delta \cdot M(\theta, w) \cdot t$$
+
+- $B(w)$: baseline activation (higher for HF words)
+- $M(\theta, w)$: semantic match between target and word
+- $\delta$: drift rate
+
+The key insight is that frequency effects are immediate, but semantic effects require time.
+
+```{python}
+#| label: fig-model-schematic
+#| fig-cap: "Resource-rational model overview"
+
+fig = plt.figure(figsize=(10, 3.5))
+
+# === Panel A: Semantic space ===
+ax1 = fig.add_subplot(1, 3, 1)
+
+positions = [0, 0.5, 1]
+labels = ['HF₁', 'LF', 'HF₂']
+colors_words = [color_hf, color_lf, color_hf]
+
+x = np.linspace(-0.3, 1.3, 200)
+
+for pos, label, c in zip(positions, labels, colors_words):
+    y = norm.pdf(x, loc=pos, scale=sigma)
+    y = y / y.max() * 0.8
+    ax1.fill_between(x, y, alpha=0.3, color=c)
+    ax1.plot(x, y, color=c, lw=1.5)
+    ax1.text(pos, -0.15, label, ha='center', fontsize=10, fontweight='bold')
+
+ax1.axvline(0.5, color='black', ls='--', lw=1, alpha=0.5, label='Prototype')
+ax1.axvline(0.25, color='black', ls=':', lw=1, alpha=0.5, label='Boundary')
+
+ax1.set_xlim(-0.2, 1.2)
+ax1.set_ylim(-0.25, 1)
+ax1.set_xlabel('Semantic space (θ)')
+ax1.set_ylabel('Word meaning density')
+ax1.set_title('A. Word meanings', loc='left')
+ax1.set_yticks([])
+ax1.legend(loc='upper right', frameon=False, fontsize=7)
+
+# === Panel B: Activation trajectories ===
+ax2 = fig.add_subplot(1, 3, 2)
+
+# Compute activation trajectories at prototype (theta=0.5)
+# Use continuous time for smooth visualization
+times = np.linspace(0, 1.0, 100)
+theta_proto = 0.5
+
+# Activation = baseline + drift_rate * semantic_match * time
+# Compute semantic matches at prototype
+lf_sem_match = float(semantic_match(theta_proto, 1, sigma))  # LF at 0.5
+hf_sem_match = float(semantic_match(theta_proto, 0, sigma))  # HF at 0 (same as at 1)
+
+# Trajectories using continuous formula
+hf_traj = baseline_hf + drift_rate * hf_sem_match * times
+lf_traj = baseline_lf + drift_rate * lf_sem_match * times
+
+ax2.plot(times, hf_traj, color=color_hf, lw=2.5, ls='-', label='HF')
+ax2.plot(times, lf_traj, color=color_lf, lw=2.5, ls='-', label='LF')
+
+# Time pressure conditions (scaled to [0,1])
+t_strict = 0.8   # corresponds to time index 8
+t_lenient = 1.0  # corresponds to time index 10
+
+ax2.axvline(t_strict, color=color_strict, ls='-', lw=2, alpha=0.8)
+ax2.axvline(t_lenient, color=color_lenient, ls='-', lw=2, alpha=0.8)
+
+ax2.set_xlabel('Time')
+ax2.set_ylabel('Activation')
+ax2.set_title('B. Activation at prototype', loc='left')
+ax2.legend(loc='upper left', frameon=False, fontsize=8)
+ax2.set_xlim(0, 1.1)
+ax2.set_ylim(0, None)
+
+ymax = ax2.get_ylim()[1]
+ax2.text(t_strict + 0.02, ymax * 0.92, 'Strict\ndeadline',
+         color=color_strict, ha='left', fontsize=7, va='top')
+ax2.text(t_lenient + 0.02, ymax * 0.92, 'Lenient',
+         color=color_lenient, ha='left', fontsize=7, va='top')
+
+# Annotation showing LF wins with time
+idx_late = 80
+ax2.annotate('', xy=(times[idx_late], lf_traj[idx_late]),
+             xytext=(times[idx_late], hf_traj[idx_late]),
+             arrowprops=dict(arrowstyle='<->', color='gray', lw=1))
+ax2.text(times[idx_late] + 0.05, (lf_traj[idx_late] + hf_traj[idx_late])/2,
+         'LF\nwins', fontsize=7, va='center')
+
+# === Panel C: P(LF) predictions ===
+ax3 = fig.add_subplot(1, 3, 3)
+
+results = predict_time_pressure(
+    sigma=sigma, baseline_hf=baseline_hf, baseline_lf=baseline_lf,
+    drift_rate=drift_rate, temperature=temperature,
+    time_strict=8, time_lenient=10
+)
+
+angles = np.array(results['angles'])
+distances_deg = np.abs(angles - 0.5) * 90  # distance from LF prototype in degrees
+
+# Get P(LF) = column 1 of predictions
+p_lenient = np.array(results['lenient'][:, 1])
+p_strict = np.array(results['strict'][:, 1])
+
+# Sort by distance for clean plotting
+sort_idx = np.argsort(distances_deg)
+unique_dist = distances_deg[sort_idx]
+
+ax3.plot(unique_dist, p_lenient[sort_idx], color=color_lenient, lw=2, label='Lenient')
+ax3.plot(unique_dist, p_strict[sort_idx], color=color_strict, lw=2, label='Strict')
+ax3.axvline(22.5, color='gray', ls='--', lw=1, alpha=0.5)
+
+ax3.set_xlim(0, 45)
+ax3.set_ylim(0, 1)
+ax3.set_xlabel('Distance from LF (°)')
+ax3.set_ylabel('P(LF Response)')
+ax3.set_title('C. Resource-rational', loc='left')
+ax3.legend(loc='lower left', frameon=False, fontsize=7)
+
+# === Inset: Fixed-budget model ===
+ax_inset = ax3.inset_axes([0.58, 0.48, 0.38, 0.38])
+
+def fixed_budget_p_lf(distances, shift=0):
+    positions = 0.5 - distances / 90
+
+    lf_match = norm.pdf(positions, loc=0.5, scale=sigma)
+    lf_match = lf_match / lf_match.max()
+    hf_match = (norm.pdf(positions, loc=0, scale=sigma) +
+                norm.pdf(positions, loc=1, scale=sigma)) / 2
+    hf_match = hf_match / norm.pdf(0, loc=0, scale=sigma)
+
+    lf_score = lf_match * 0.4
+    hf_score = hf_match * 0.7
+
+    log_odds = np.log(lf_score / hf_score) + shift
+    return 1 / (1 + np.exp(-log_odds))
+
+fixed_lenient = fixed_budget_p_lf(unique_dist, shift=0.3)
+fixed_strict = fixed_budget_p_lf(unique_dist, shift=-0.3)
+
+ax_inset.plot(unique_dist, fixed_lenient, color=color_lenient, lw=1.5)
+ax_inset.plot(unique_dist, fixed_strict, color=color_strict, lw=1.5)
+ax_inset.set_xlim(0, 45)
+ax_inset.set_ylim(0, 1)
+ax_inset.set_xticks([])
+ax_inset.set_yticks([])
+ax_inset.set_title('Fixed', fontsize=7, pad=2)
+ax_inset.axvline(22.5, color='gray', ls='--', lw=0.5, alpha=0.5)
+
+plt.tight_layout()
+fig.savefig('../latex/figures/model_schematic.pdf', bbox_inches='tight')
+fig.savefig('../latex/figures/model_schematic.png', bbox_inches='tight', dpi=300)
+plt.show()
+```
