@@ -129,7 +129,18 @@ d_production_cleaned <- d_production |>
                                    nearestFreq == "LF" & nextNearestFreq == "HF" ~ TRUE,
                                    TRUE ~ FALSE),
          ambig_trial = ifelse(distance <= -11, TRUE, FALSE),
-         is_critical = ifelse(between_freqs & ambig_trial, TRUE, FALSE))
+         is_critical = ifelse(between_freqs & ambig_trial, TRUE, FALSE)) |>
+  # compute distance to LF word specifically (for VOC analysis)
+  mutate(
+    # if nearest is LF, distance to LF is just abs(distance)
+    # if nearest is HF, need to compute distance to next-nearest (which is LF in between_freqs trials)
+    raw_dist_to_lf = ifelse(nearestFreq == "LF",
+                            abs(distance),
+                            abs(targetAngle - nextNearestAngle)),
+    # handle circular wraparound (>180 means go the other way)
+    dist_to_lf = ifelse(raw_dist_to_lf > 180, 360 - raw_dist_to_lf, raw_dist_to_lf)
+  ) |>
+  select(-raw_dist_to_lf)
 
 # Write to processed_data folder
 
