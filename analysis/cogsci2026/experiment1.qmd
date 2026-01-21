@@ -149,101 +149,124 @@ cat("N participants:", n_distinct(d_critical$subject_id), "\n")
 cat("Overall P(LF):", round(mean(d_critical$responded_lf), 3), "\n")
 ```
 
-# Figure 2: Empirical Results
-
-```{r figure-helper}
-# Helper function for binned plots with model predictions
-plot_by_condition <- function(data, condition_var, condition_contrast,
-                              colors, legend_title, legend_labels = waiver()) {
-  n_bins <- 9
-
-  # Binned means
-  d_binned <- data |>
-    mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
-    group_by(condition = .data[[condition_var]], dist_bin) |>
-    summarise(
-      n = n(),
-      p_lf = mean(responded_lf),
-      se = sqrt(p_lf * (1 - p_lf) / n),
-      dist_mean = mean(dist_to_lf),
-      .groups = "drop"
-    )
-
-  # Model predictions
-  formula <- as.formula(paste0(
-    "responded_lf ~ dist_to_lf * ", condition_contrast, " + (1 | subject_id)"
-  ))
-  model <- glmer(formula, data = data, family = binomial)
-
-  pred_grid <- expand.grid(
-    dist_to_lf = seq(0, 45, length.out = 100),
-    contrast = c(-0.5, 0.5)
-  )
-  names(pred_grid)[2] <- condition_contrast
-  pred_grid$p_lf_pred <- predict(model, newdata = pred_grid, type = "response", re.form = NA)
-  pred_grid$condition <- levels(factor(data[[condition_var]]))[as.numeric(pred_grid[[condition_contrast]] > 0) + 1]
-
-  ggplot(d_binned, aes(x = dist_mean, y = p_lf, color = factor(condition))) +
-    geom_point(size = 3) +
-    geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
-    geom_line(data = pred_grid, aes(x = dist_to_lf, y = p_lf_pred), linewidth = 1.2) +
-    geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
-    scale_color_manual(values = colors, labels = legend_labels) +
-    scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
-    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
-    labs(x = "Distance from LF (deg)", y = "P(LF)", color = legend_title) +
-    theme_minimal(base_size = 12) +
-    theme(
-      legend.position = c(0.75, 0.85),
-      legend.background = element_rect(fill = "white", color = NA),
-      panel.grid.minor = element_blank()
-    )
-}
-```
-
-```{r fig-results, fig.width=10, fig.height=4}
-#| fig-cap: "P(LF) by distance from LF prototype, split by (A) time pressure and (B) frequency ratio"
-
-p_tp <- plot_by_condition(
-  d_critical, "time_pressure", "time_pressure_c",
-  colors_tp, "Time Pressure", c("Strict (5s)", "Lenient (10s)")
-)
-
-p_freq <- plot_by_condition(
-  d_critical, "frequency_ratio", "freq_ratio_c",
-  colors_freq, "Frequency Ratio"
-)
-
-p_combined <- (p_tp + labs(title = "A")) + (p_freq + labs(title = "B")) &
-  theme(plot.title = element_text(face = "bold"))
-
-p_combined
-
-ggsave(file.path(fig_path, "empirical_results.pdf"), p_combined,
-       width = 10, height = 4, dpi = 300)
-```
-
 # Statistical Models
 
-```{r model-tp}
+```{r models}
+# Time pressure × distance interaction
 m_tp <- glmer(
   responded_lf ~ time_pressure_c * dist_to_lf + freq_ratio_c + (1 | subject_id),
   data = d_critical, family = binomial
 )
-summary(m_tp)
-```
 
-```{r model-freq}
+# Frequency ratio × distance interaction
 m_freq <- glmer(
   responded_lf ~ freq_ratio_c * dist_to_lf + time_pressure_c + (1 | subject_id),
   data = d_critical, family = binomial
 )
+
+tp_coef <- summary(m_tp)$coefficients["time_pressure_c:dist_to_lf", ]
+freq_coef <- summary(m_freq)$coefficients["freq_ratio_c:dist_to_lf", ]
+```
+
+```{r model-summaries}
+summary(m_tp)
 summary(m_freq)
 ```
 
-```{r extract-coefficients}
-tp_coef <- summary(m_tp)$coefficients["time_pressure_c:dist_to_lf", ]
-freq_coef <- summary(m_freq)$coefficients["freq_ratio_c:dist_to_lf", ]
+# Figure 2: Empirical Results
+
+```{r fig-setup}
+# Bin data for plotting
+n_bins <- 9
+
+# Common plot theme
+theme_fig <- theme_minimal(base_size = 12) +
+  theme(
+    legend.position = c(0.75, 0.85),
+    legend.background = element_rect(fill = "white", color = NA),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+```
+
+```{r fig-panel-a, fig.width=5, fig.height=4}
+# Panel A: Time Pressure effect
+d_binned_tp <- d_critical |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(time_pressure, dist_bin) |>
+  summarise(
+    p_lf = mean(responded_lf),
+    se = sqrt(p_lf * (1 - p_lf) / n()),
+    dist_mean = mean(dist_to_lf),
+    .groups = "drop"
+  )
+
+# Model predictions
+pred_tp <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  time_pressure_c = c(-0.5, 0.5),
+  freq_ratio_c = 0
+) |>
+  mutate(
+    time_pressure = ifelse(time_pressure_c < 0, 5, 10),
+    p_lf = predict(m_tp, newdata = pick(everything()), type = "response", re.form = NA)
+  )
+
+p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = p_lf, color = factor(time_pressure))) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
+  geom_line(data = pred_tp, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Time Pressure", title = "A") +
+  theme_fig
+```
+
+```{r fig-panel-b, fig.width=5, fig.height=4}
+# Panel B: Frequency Ratio effect
+d_binned_freq <- d_critical |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(frequency_ratio, dist_bin) |>
+  summarise(
+    p_lf = mean(responded_lf),
+    se = sqrt(p_lf * (1 - p_lf) / n()),
+    dist_mean = mean(dist_to_lf),
+    .groups = "drop"
+  )
+
+# Model predictions
+pred_freq <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  freq_ratio_c = c(-0.5, 0.5),
+  time_pressure_c = 0
+) |>
+  mutate(
+    frequency_ratio = ifelse(freq_ratio_c < 0, "1:2", "1:4"),
+    p_lf = predict(m_freq, newdata = pick(everything()), type = "response", re.form = NA)
+  )
+
+p_freq <- ggplot(d_binned_freq, aes(x = dist_mean, y = p_lf, color = frequency_ratio)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
+  geom_line(data = pred_freq, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = colors_freq) +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Frequency Ratio", title = "B") +
+  theme_fig
+```
+
+```{r fig-combined, fig.width=10, fig.height=4}
+#| fig-cap: "P(LF) by distance from LF prototype"
+
+p_combined <- p_tp + p_freq
+p_combined
+
+ggsave(file.path(fig_path, "empirical_results.pdf"), p_combined,
+       width = 10, height = 4, dpi = 300)
 ```
 
 **Time pressure x distance**: $\beta$ = `r round(tp_coef["Estimate"], 3)`, *z* = `r round(tp_coef["z value"], 2)`, *p* < .001
