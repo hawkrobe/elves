@@ -15,204 +15,107 @@ execute:
 
 ```{r setup}
 library(tidyverse)
+library(tidyboot)
 library(lme4)
 library(lmerTest)
 library(here)
-library(scales)
+library(patchwork)
 
-# Color palette for payoff conditions
-# TODO: adjust colors based on actual conditions
+# Color palette
 colors_payoff <- c("low" = "#E94F37", "high" = "#2E86AB")
 
 # Output paths
 fig_path <- here("latex/figures")
 ```
 
-# Overview
-
-Experiment 2 tests whether speakers adjust their retrieval strategies when precision is more valuable. The key manipulation is the **payoff for precise responses**.
-
-**Key prediction**: Higher payoff for precision → steeper boundaries (more LF at prototype, similar HF at boundaries).
-
-# Data Loading
+# Data Preprocessing
 
 ```{r load-data}
-# TODO: Update paths once Exp2 data is collected
-# participants <- read_csv(here("data/exp2/processed_data/participants.csv"),
-#                          show_col_types = FALSE)
-# production <- read_csv(here("data/exp2/processed_data/production.csv"),
-#                        show_col_types = FALSE)
+# TODO: Update path once data collected
+raw_data_path <- here("data/exp2/raw_data")
+# raw_files <- list.files(raw_data_path, full.names = TRUE) |>
+#   str_subset("inprog", negate = TRUE)
+#
+# cols_needed <- c("subject_id", "frequency_ratio", "payoff_condition", "survey_difficulty",
+#                  "is_correct", "response", "response_text", "target", "angle", "targetFreq",
+#                  "rt", "nearest_trained_angle", "timed_out")
+#
+# raw_data <- map_dfr(raw_files, \(f) {
+#   read_csv(f, show_col_types = FALSE) |>
+#     select(any_of(cols_needed)) |>
+#     mutate(across(everything(), as.character))
+# })
+```
 
-# Placeholder message
-cat("Awaiting Experiment 2 data...\n")
-cat("Expected data path: data/exp2/processed_data/\n")
+```{r extract-data}
+# TODO: Extract participant conditions, angle mappings, production trials
+```
+
+```{r join-frequencies}
+# TODO: Join frequency labels and compute dist_to_lf
 ```
 
 # Sample Descriptives
 
 ```{r sample-descriptives}
-# TODO: Fill in once data available
-# n_participants <- n_distinct(participants$subject_id)
-#
-# condition_counts <- participants |>
-#   count(payoff_condition) |>
-#   pivot_wider(names_from = payoff_condition, values_from = n)
-#
-# cat("Total participants:", n_participants, "\n\n")
-# cat("Condition breakdown:\n")
-# knitr::kable(condition_counts)
+# TODO: Participant counts by condition
+```
+
+```{r timeout-rates}
+# TODO: Timeout rates by condition
 ```
 
 # Critical Trial Selection
 
 ```{r filter-critical}
-# TODO: Adapt from Exp1 based on Exp2 design
-#
-# d_critical <- d |>
-#   filter(
-#     between_freqs == TRUE,
-#     timed_out == 0,
-#     !is.na(responseFreq),
-#     rt > 200
-#   ) |>
-#   mutate(
-#     responded_lf = as.numeric(responseFreq == "LF"),
-#     abs_distance = abs(distance),
-#     # TODO: define payoff condition coding
-#     payoff_c = ifelse(payoff_condition == "low", -0.5, 0.5)
-#   )
-```
-
-# Figure: Payoff Manipulation Effect
-
-```{r fig-payoff, fig.width=5, fig.height=4}
-#| label: fig-payoff
-#| fig-cap: "P(LF) by distance from LF trained angle, split by payoff condition"
-
-# TODO: Create figure similar to Exp1 Panel A
-#
-# n_bins <- 9
-# d_binned <- d_critical |>
-#   mutate(dist_bin = cut(abs_distance, breaks = n_bins, include.lowest = TRUE)) |>
-#   group_by(payoff_condition, dist_bin) |>
-#   summarise(
-#     n = n(),
-#     p_lf = mean(responded_lf),
-#     se = sqrt(p_lf * (1 - p_lf) / n),
-#     dist_mean = mean(abs_distance),
-#     .groups = "drop"
-#   )
-#
-# # Fit model for smooth curves
-# m_payoff <- glmer(
-#   responded_lf ~ abs_distance * payoff_c + (1 | subject_id),
-#   data = d_critical,
-#   family = binomial(link = "logit")
-# )
-#
-# # Plot
-# p_payoff <- ggplot(d_binned, aes(x = dist_mean, y = p_lf,
-#                                   color = payoff_condition)) +
-#   geom_point(size = 3) +
-#   geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 0.5) +
-#   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
-#   scale_color_manual(values = colors_payoff) +
-#   scale_x_continuous(limits = c(0, 23)) +
-#   scale_y_continuous(limits = c(0, 1)) +
-#   labs(
-#     x = "Distance from LF (°)",
-#     y = "P(LF)",
-#     color = "Payoff"
-#   ) +
-#   theme_minimal(base_size = 12) +
-#   theme(legend.position = c(0.75, 0.85))
-#
-# p_payoff
-
-cat("Figure placeholder: awaiting data\n")
+# TODO: Filter to between-frequency trials, create contrast codes
 ```
 
 # Statistical Models
 
-## Model 1: Main Effect of Payoff
-
-```{r model-payoff}
-# TODO: Run models once data available
-#
-# m1 <- glmer(
-#   responded_lf ~ payoff_c + distance_c + (1 | subject_id),
-#   data = d_critical,
-#   family = binomial(link = "logit")
+```{r models}
+# TODO: Fit models
+# m_payoff <- glmer(
+#   responded_lf ~ payoff_c * dist_to_lf + (1 | subject_id),
+#   data = d_critical, family = binomial
 # )
-#
-# summary(m1)
-```
-## Model 2: Payoff × Distance Interaction
-
-**Key test**: Does payoff condition interact with distance from LF prototype?
-
-```{r model-interaction}
-# TODO: Run interaction model
-#
-# m2 <- glmer(
-#   responded_lf ~ payoff_c * distance_c + (1 | subject_id),
-#   data = d_critical,
-#   family = binomial(link = "logit")
-# )
-#
-# summary(m2)
-#
-# # Model comparison
-# anova(m1, m2)
 ```
 
-**Expected result**: Significant payoff × distance interaction, with higher payoff producing steeper slope (more differentiation between prototype and boundary).
+```{r model-summaries}
+# summary(m_payoff)
+```
+
+# Figure: Payoff Effect
+
+```{r fig-setup}
+n_bins <- 9
+
+theme_fig <- theme_minimal(base_size = 12) +
+  theme(
+    legend.position = c(0.75, 0.85),
+    legend.background = element_rect(fill = "white", color = NA),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+```
+
+```{r fig-payoff, fig.width=5, fig.height=4}
+# TODO: Create figure with tidyboot CIs and model predictions
+```
 
 # Response Time Analysis
 
-```{r rt-analysis}
-# TODO: RT analysis
-#
-# rt_summary <- d_critical |>
-#   group_by(payoff_condition) |>
-#   summarise(
-#     M_rt = mean(rt),
-#     SD_rt = sd(rt),
-#     .groups = "drop"
-#   )
-#
-# knitr::kable(rt_summary)
+```{r rt-summary}
+# TODO: RT by condition
 ```
 
-# Comparison with Experiment 1
-
-```{r exp-comparison}
-# TODO: Load Exp1 data and compare effect sizes
-#
-# Effect size comparison:
-# - Exp1 time pressure effect
-# - Exp1 frequency ratio effect
-# - Exp2 payoff effect
+```{r rt-model}
+# TODO: RT model
 ```
 
-# Summary Statistics for Paper
+# Summary
 
-```{r summary-for-paper}
-cat("=== SUMMARY FOR MANUSCRIPT ===\n\n")
-cat("Awaiting Experiment 2 data collection...\n")
-
-# TODO: Fill in once data available
-# cat("Participants:\n")
-# cat(sprintf("  N = %d\n", n_participants))
-#
-# cat("\nPayoff × distance interaction:\n")
-# payoff_int <- summary(m2)$coefficients["payoff_c:distance_c", ]
-# cat(sprintf("  β = %.3f, z = %.2f, p = %.3f\n",
-#             payoff_int["Estimate"], payoff_int["z value"], payoff_int["Pr(>|z|)"]))
-```
-
-# Session Info
-
-```{r session-info}
-sessionInfo()
+```{r summary}
+cat("=== EXPERIMENT 2 SUMMARY ===\n\n")
+cat("Awaiting data collection...\n")
 ```
