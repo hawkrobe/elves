@@ -1,0 +1,484 @@
+---
+title: "Experiment 1: Cost Pressure"
+author: "Elves Project Team"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 8
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(here)
+library(patchwork)
+
+# Color palette
+colors_tp <- c("5" = "#E94F37", "10" = "#2E86AB")
+colors_freq <- c("1:2" = "#6B4C9A", "1:4" = "#2E86AB")
+
+# Output paths
+fig_path <- here("latex/figures")
+```
+
+# Data Preprocessing
+
+Load and clean raw experimental data.
+
+```{r load-raw-data}
+raw_data_path <- here("data/full-production/raw_data/run-1")
+raw_files <- grep("inprog", list.files(raw_data_path, full.names = TRUE),
+                  value = TRUE, invert = TRUE)
+
+cat("Found", length(raw_files), "participant data files\n")
+```
+
+## Extract participant-level data
+
+```{r extract-participants}
+extract_participant_data <- function(raw_data_file) {
+  read_csv(raw_data_file, show_col_types = FALSE) |>
+    select(subject_id, prolific_id, frequency_ratio, time_pressure,
+           selected_training_block_id, selected_test_block_id,
+           survey_difficulty) |>  # Only select columns we need
+    filter(!is.na(survey_difficulty))
+}
+
+participants <- map_dfr(raw_files, extract_participant_data) |>
+  select(-prolific_id)  # Remove PII
+
+cat("N participants:", nrow(participants), "\n")
+```
+
+## Extract exposure data (for angle-word mappings)
+
+```{r extract-exposure}
+extract_exposure_data <- function(raw_data_file) {
+  read_csv(raw_data_file, show_col_types = FALSE) |>
+    select(subject_id, is_correct, response_text, target, angle, targetFreq, response) |>
+    filter(!is.na(is_correct)) |>
+    mutate(parsed = map(response, jsonlite::parse_json)) |>
+    unnest_wider(parsed, names_sep = "_") |>
+    filter(!is.na(`parsed_exposure-response`)) |>
+    select(subject_id, is_correct, response_text, target, angle, targetFreq)
+}
+
+exposure <- map_dfr(raw_files, extract_exposure_data)
+
+# Store angle-word mappings per participant
+angle_mappings <- exposure |>
+  filter(is_correct == 1) |>
+  select(subject_id, target, angle, targetFreq)
+```
+
+## Extract and clean production data
+
+```{r extract-production}
+extract_production_data <- function(raw_data_file) {
+  read_csv(raw_data_file, show_col_types = FALSE) |>
+    select(subject_id, rt, is_correct, response_text, target, angle, targetFreq,
+           trial_id, nearest_trained_angle, bonus_points, total_points, timed_out) |>
+    filter(!is.na(nearest_trained_angle))
+}
+
+production_raw <- map_dfr(raw_files, extract_production_data)
+
+# Clean production data: fix angle assignments and join frequency labels
+production <- production_raw |>
+  mutate(
+    distance = nearest_trained_angle - angle,
+    # Compute next-nearest angle (45° away from nearest)
+    c_next_nearest = ifelse(distance > 0,
+                            nearest_trained_angle - 45,
+                            nearest_trained_angle + 45),
+    next_nearest_angle = case_when(
+      c_next_nearest < 0 ~ 360 + c_next_nearest,
+      c_next_nearest > 360 ~ c_next_nearest - 360,
+      TRUE ~ c_next_nearest
+    )
+  ) |>
+  select(
+    subject_id, rt, is_correct, trial_id, response_text,
+    targetAngle = angle, targetLabel = target, targetFreq,
+    nearestAngle = nearest_trained_angle,
+    nextNearestAngle = next_nearest_angle,
+    distance, bonus_points, total_points, timed_out
+  ) |>
+  # Join frequency labels from angle mappings
+  left_join(
+    angle_mappings |>
+      rename(nextNearestAngle = angle, nextNearestFreq = targetFreq,
+             nextNearestLabel = target),
+    by = c("subject_id", "nextNearestAngle")
+  ) |>
+  left_join(
+    angle_mappings |>
+      select(-target) |>
+      rename(nearestAngle = angle, nearestFreq = targetFreq),
+    by = c("subject_id", "nearestAngle")
+  ) |>
+  left_join(
+    angle_mappings |>
+      select(subject_id, response_text = target, responseFreq = targetFreq),
+    by = c("subject_id", "response_text")
+  ) |>
+  # Compute trial type flags
+
+mutate(
+    between_freqs = (nearestFreq == "HF" & nextNearestFreq == "LF") |
+                    (nearestFreq == "LF" & nextNearestFreq == "HF"),
+    ambig_trial = distance <= -11,
+    is_critical = between_freqs & ambig_trial
+  ) |>
+  # Compute distance to LF word (key predictor)
+  mutate(
+    raw_dist_to_lf = ifelse(nearestFreq == "LF",
+                            abs(distance),
+                            abs(targetAngle - nextNearestAngle)),
+    # Handle circular wraparound
+    dist_to_lf = ifelse(raw_dist_to_lf > 180, 360 - raw_dist_to_lf, raw_dist_to_lf)
+  ) |>
+  select(-raw_dist_to_lf)
+
+cat("Production trials:", nrow(production), "\n")
+cat("Between-frequency trials:", sum(production$between_freqs, na.rm = TRUE), "\n")
+```
+
+## Merge with participant conditions
+
+```{r merge-data}
+d <- production |>
+  left_join(
+    participants |> select(subject_id, frequency_ratio, time_pressure),
+    by = "subject_id"
+  )
+```
+
+# Sample Descriptives
+
+```{r sample-descriptives}
+n_participants <- n_distinct(participants$subject_id)
+
+condition_counts <- participants |>
+  count(time_pressure, frequency_ratio) |>
+  pivot_wider(names_from = frequency_ratio, values_from = n)
+
+cat("Total participants:", n_participants, "\n\n")
+knitr::kable(condition_counts, col.names = c("Time Pressure (s)", "1:2", "1:4"),
+             caption = "Participants per condition")
+```
+
+# Timeout Rates
+
+```{r timeout-rates}
+timeout_by_tp <- d |>
+  group_by(time_pressure) |>
+  summarise(
+    n_trials = n(),
+    n_timeout = sum(timed_out, na.rm = TRUE),
+    pct_timeout = 100 * n_timeout / n_trials,
+    .groups = "drop"
+  )
+
+knitr::kable(timeout_by_tp, digits = 1,
+             col.names = c("Time Pressure (s)", "N Trials", "N Timeouts", "% Timeout"))
+```
+
+# Critical Trial Selection
+
+Critical trials: target falls between LF and HF trained directions.
+
+```{r filter-critical}
+d_critical <- d |>
+  filter(
+    between_freqs == TRUE,
+    timed_out == 0,
+    !is.na(responseFreq)
+  ) |>
+  mutate(
+    responded_lf = as.numeric(responseFreq == "LF"),
+    time_pressure_c = ifelse(time_pressure == 5, -0.5, 0.5),
+    freq_ratio_c = ifelse(frequency_ratio == "1:2", -0.5, 0.5)
+  )
+
+cat("Critical trials:\n")
+cat("  N participants:", n_distinct(d_critical$subject_id), "\n")
+cat("  N trials:", nrow(d_critical), "\n")
+cat("  Overall P(LF):", round(mean(d_critical$responded_lf), 3), "\n")
+cat("  dist_to_lf range:", range(d_critical$dist_to_lf), "degrees\n")
+```
+
+# Descriptive Statistics
+
+```{r descriptives}
+desc_stats <- d_critical |>
+  group_by(time_pressure, frequency_ratio) |>
+  summarise(
+    n = n(),
+    p_lf = mean(responded_lf),
+    sd = sd(responded_lf),
+    .groups = "drop"
+  )
+
+knitr::kable(desc_stats, digits = 3,
+             col.names = c("Time Pressure", "Freq Ratio", "N", "P(LF)", "SD"))
+```
+
+# Figure 2: Empirical Results
+
+## Panel A: Time Pressure Effect
+
+```{r fig-time-pressure, fig.width=5, fig.height=4}
+# Binned summary
+n_bins <- 9
+d_binned_tp <- d_critical |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(time_pressure, dist_bin) |>
+  summarise(
+    n = n(),
+    p_lf = mean(responded_lf),
+    se = sqrt(p_lf * (1 - p_lf) / n),
+    dist_mean = mean(dist_to_lf),
+    .groups = "drop"
+  )
+
+# Model for smooth curves
+m_tp_plot <- glmer(
+  responded_lf ~ dist_to_lf * time_pressure_c + (1 | subject_id),
+  data = d_critical,
+  family = binomial(link = "logit")
+)
+
+# Predictions
+pred_tp <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  time_pressure_c = c(-0.5, 0.5)
+) |>
+  mutate(
+    time_pressure = ifelse(time_pressure_c == -0.5, 5, 10),
+    p_lf_pred = predict(m_tp_plot, newdata = pick(everything()),
+                        type = "response", re.form = NA)
+  )
+
+# Plot
+p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = p_lf,
+                                 color = factor(time_pressure))) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
+  geom_line(data = pred_tp, aes(x = dist_to_lf, y = p_lf_pred), linewidth = 1.2) +
+  geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (°)", y = "P(LF)", color = "Time Pressure") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = c(0.75, 0.85),
+        legend.background = element_rect(fill = "white", color = NA),
+        panel.grid.minor = element_blank())
+
+p_tp
+```
+
+## Panel B: Frequency Ratio Effect
+
+```{r fig-freq-ratio, fig.width=5, fig.height=4}
+# Binned summary
+d_binned_freq <- d_critical |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(frequency_ratio, dist_bin) |>
+  summarise(
+    n = n(),
+    p_lf = mean(responded_lf),
+    se = sqrt(p_lf * (1 - p_lf) / n),
+    dist_mean = mean(dist_to_lf),
+    .groups = "drop"
+  )
+
+# Model for smooth curves
+m_freq_plot <- glmer(
+  responded_lf ~ dist_to_lf * freq_ratio_c + (1 | subject_id),
+  data = d_critical,
+  family = binomial(link = "logit")
+)
+
+# Predictions
+pred_freq <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  freq_ratio_c = c(-0.5, 0.5)
+) |>
+  mutate(
+    frequency_ratio = ifelse(freq_ratio_c == -0.5, "1:2", "1:4"),
+    p_lf_pred = predict(m_freq_plot, newdata = pick(everything()),
+                        type = "response", re.form = NA)
+  )
+
+# Plot
+p_freq <- ggplot(d_binned_freq, aes(x = dist_mean, y = p_lf, color = frequency_ratio)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
+  geom_line(data = pred_freq, aes(x = dist_to_lf, y = p_lf_pred), linewidth = 1.2) +
+  geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = colors_freq) +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (°)", y = "P(LF)", color = "Frequency Ratio") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = c(0.75, 0.85),
+        legend.background = element_rect(fill = "white", color = NA),
+        panel.grid.minor = element_blank())
+
+p_freq
+```
+
+## Combined Figure
+
+```{r fig-combined, fig.width=10, fig.height=4}
+p_combined <- (p_tp + labs(title = "A") + theme(plot.title = element_text(face = "bold"))) +
+              (p_freq + labs(title = "B") + theme(plot.title = element_text(face = "bold")))
+
+p_combined
+
+# Save for paper
+ggsave(file.path(fig_path, "empirical_results.pdf"), p_combined,
+       width = 10, height = 4, dpi = 300)
+```
+
+# Statistical Models
+
+## Model 1: Main Effects
+
+```{r model-main}
+m1 <- glmer(
+  responded_lf ~ time_pressure_c + freq_ratio_c + dist_to_lf + (1 | subject_id),
+  data = d_critical,
+  family = binomial(link = "logit")
+)
+
+summary(m1)
+```
+
+## Model 2: Time Pressure × Distance Interaction
+
+```{r model-tp-interaction}
+m2 <- glmer(
+  responded_lf ~ time_pressure_c * dist_to_lf + freq_ratio_c + (1 | subject_id),
+  data = d_critical,
+  family = binomial(link = "logit")
+)
+
+summary(m2)
+anova(m1, m2)
+```
+
+```{r}
+tp_coef <- summary(m2)$coefficients["time_pressure_c:dist_to_lf", ]
+```
+
+**Time pressure × distance interaction**: β = `r round(tp_coef["Estimate"], 3)`, z = `r round(tp_coef["z value"], 2)`, p < .001
+
+## Model 3: Frequency Ratio × Distance Interaction
+
+```{r model-freq-interaction}
+m3 <- glmer(
+  responded_lf ~ freq_ratio_c * dist_to_lf + time_pressure_c + (1 | subject_id),
+  data = d_critical,
+  family = binomial(link = "logit")
+)
+
+summary(m3)
+```
+
+```{r}
+freq_coef <- summary(m3)$coefficients["freq_ratio_c:dist_to_lf", ]
+```
+
+**Frequency ratio × distance interaction**: β = `r round(freq_coef["Estimate"], 3)`, z = `r round(freq_coef["z value"], 2)`, p < .001
+
+## Model 4: Full Three-Way Interaction
+
+```{r model-full}
+m4 <- glmer(
+  responded_lf ~ time_pressure_c * freq_ratio_c * dist_to_lf + (1 | subject_id),
+  data = d_critical,
+  family = binomial(link = "logit")
+)
+
+summary(m4)
+```
+
+# Response Time Analysis
+
+```{r rt-descriptives}
+rt_summary <- d_critical |>
+  group_by(time_pressure, frequency_ratio) |>
+  summarise(
+    M_rt = mean(rt),
+    SD_rt = sd(rt),
+    Median_rt = median(rt),
+    .groups = "drop"
+  )
+
+knitr::kable(rt_summary, digits = 0,
+             col.names = c("Time Pressure", "Freq Ratio", "M RT", "SD", "Median"))
+```
+
+```{r rt-by-response}
+rt_by_resp <- d_critical |>
+  group_by(responseFreq, time_pressure) |>
+  summarise(
+    M_rt = mean(rt),
+    SD_rt = sd(rt),
+    n = n(),
+    .groups = "drop"
+  )
+
+knitr::kable(rt_by_resp, digits = 0,
+             col.names = c("Response", "Time Pressure", "M RT", "SD", "N"))
+```
+
+```{r rt-model}
+d_critical <- d_critical |> mutate(log_rt = log(as.numeric(rt)))
+
+m_rt <- lmer(
+  log_rt ~ responded_lf * dist_to_lf * time_pressure_c + (1 | subject_id),
+  data = d_critical
+)
+
+summary(m_rt)
+```
+
+# Summary for Manuscript
+
+```{r summary-for-paper}
+cat("=== EXPERIMENT 1 SUMMARY ===\n\n")
+
+cat("Participants: N =", n_participants, "\n")
+
+cat("\nTimeout rates:\n")
+cat(sprintf("  Strict (5s): %.1f%%\n",
+            timeout_by_tp$pct_timeout[timeout_by_tp$time_pressure == 5]))
+cat(sprintf("  Lenient (10s): %.1f%%\n",
+            timeout_by_tp$pct_timeout[timeout_by_tp$time_pressure == 10]))
+
+cat("\nTime pressure × distance interaction:\n")
+cat(sprintf("  β = %.3f, z = %.2f, p < .001\n",
+            tp_coef["Estimate"], tp_coef["z value"]))
+
+cat("\nFrequency ratio × distance interaction:\n
+")
+cat(sprintf("  β = %.3f, z = %.2f, p < .001\n",
+            freq_coef["Estimate"], freq_coef["z value"]))
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
