@@ -22,7 +22,9 @@ library(here)
 library(patchwork)
 
 # Color palette
-colors_payoff <- c("low" = "#E94F37", "high" = "#2E86AB")
+# Color palettes
+colors_tp <- c("5" = "#E94F37", "10" = "#2E86AB")
+colors_payoff <- c("linear" = "#6B4C9A", "binary" = "#2E86AB")
 
 # Output paths
 fig_path <- here("latex/figures")
@@ -32,33 +34,93 @@ fig_path <- here("latex/figures")
 
 ```{r load-data}
 # TODO: Update path once data collected
-raw_data_path <- here("data/exp2/raw_data")
-# raw_files <- list.files(raw_data_path, full.names = TRUE) |>
-#   str_subset("inprog", negate = TRUE)
-#
-# cols_needed <- c("subject_id", "frequency_ratio", "payoff_condition", "survey_difficulty",
-#                  "is_correct", "response", "response_text", "target", "angle", "targetFreq",
-#                  "rt", "nearest_trained_angle", "timed_out")
-#
-# raw_data <- map_dfr(raw_files, \(f) {
-#   read_csv(f, show_col_types = FALSE) |>
-#     select(any_of(cols_needed)) |>
-#     mutate(across(everything(), as.character))
-# })
+raw_data_path <- here("data/full-production/raw_data/run-2")
+raw_files <- list.files(raw_data_path, full.names = TRUE) |>
+  str_subset("training_complete", negate = TRUE)
+
+cols_needed <- c("subject_id", "frequency_ratio", "time_pressure","payoff_structure", "survey_difficulty",
+                 "is_correct", "response", "response_text", "target", "angle", "targetFreq",
+                 "rt", "nearest_trained_angle", "timed_out")
+
+raw_data <- map_dfr(raw_files, \(f) {
+  read_csv(f, show_col_types = FALSE) |>
+    select(any_of(cols_needed)) |>
+    mutate(across(everything(), as.character))
+})
+cat("Loaded", n_distinct(raw_data$subject_id), "participants\n")
+
 ```
 
 ```{r extract-data}
 # TODO: Extract participant conditions, angle mappings, production trials
+
+# Extract participant conditions
+participants <- raw_data |>
+  filter(!is.na(survey_difficulty)) |>
+  distinct(subject_id, payoff_structure, time_pressure) |>
+  mutate(time_pressure = as.numeric(time_pressure))
+
+# Extract angle-word mappings from exposure phase
+angle_mappings <- raw_data |>
+  filter(!is.na(is_correct), str_detect(response, "exposure-response")) |>
+  filter(is_correct == "1") |>
+  distinct(subject_id, angle = as.numeric(angle), target, targetFreq)
+
+# Extract production trials
+production <- raw_data |>
+  filter(!is.na(nearest_trained_angle)) |>
+  transmute(
+    subject_id,
+    rt = as.numeric(rt),
+    response_text, target,
+    angle = as.numeric(angle),
+    targetFreq,
+    nearest_trained_angle = as.numeric(nearest_trained_angle),
+    timed_out = as.numeric(timed_out),
+    distance = nearest_trained_angle - angle,
+    # Next-nearest is 45° away, opposite direction from nearest
+    next_nearest_angle = (nearest_trained_angle + ifelse(distance > 0, -45, 45)) %% 360
+  )
 ```
 
 ```{r join-frequencies}
-# TODO: Join frequency labels and compute dist_to_lf
+# Build lookup table for angle -> frequency mapping
+angle_freq_lookup <- angle_mappings |>
+  select(subject_id, angle, freq = targetFreq, label = target)
+
+# Join frequency labels for nearest, next-nearest, and response
+d <- production |>
+  left_join(angle_freq_lookup |> rename(nearestAngle = angle, nearestFreq = freq),
+            by = c("subject_id", "nearest_trained_angle" = "nearestAngle")) |>
+  left_join(angle_freq_lookup |> rename(nextNearestFreq = freq, nextNearestLabel = label),
+            by = c("subject_id", "next_nearest_angle" = "angle")) |>
+  left_join(angle_freq_lookup |> select(subject_id, response_text = label, responseFreq = freq),
+            by = c("subject_id", "response_text")) |>
+  left_join(participants, by = "subject_id") |>
+  mutate(
+    between_freqs = nearestFreq != nextNearestFreq,
+    # Distance to LF word (key predictor)
+    dist_to_lf = ifelse(
+      nearestFreq == "LF",
+      abs(distance),
+      pmin(abs(angle - next_nearest_angle), 360 - abs(angle - next_nearest_angle))
+    )
+  )
+
+cat("Total trials:", nrow(d), "\n")
+cat("Between-frequency trials:", sum(d$between_freqs, na.rm = TRUE), "\n")
 ```
 
 # Sample Descriptives
 
 ```{r sample-descriptives}
-# TODO: Participant counts by condition
+n_participants <- n_distinct(participants$subject_id)
+
+participants |>
+  count(time_pressure, payoff_structure) |>
+  pivot_wider(names_from = payoff_structure, values_from = n) |>
+  knitr::kable(col.names = c("Time Pressure (s)", "1:2", "1:4"),
+               caption = sprintf("Participants per condition (N = %d)", n_participants))
 ```
 
 ```{r timeout-rates}
@@ -69,6 +131,17 @@ raw_data_path <- here("data/exp2/raw_data")
 
 ```{r filter-critical}
 # TODO: Filter to between-frequency trials, create contrast codes
+timeout_by_tp <- d |>
+  group_by(time_pressure) |>
+  summarise(
+    n_trials = n(),
+    n_timeout = sum(timed_out, na.rm = TRUE),
+    pct_timeout = 100 * n_timeout / n_trials,
+    .groups = "drop"
+  )
+
+knitr::kable(timeout_by_tp, digits = 1,
+             col.names = c("Time Pressure (s)", "N Trials", "N Timeouts", "% Timeout"))
 ```
 
 # Statistical Models
@@ -79,17 +152,44 @@ raw_data_path <- here("data/exp2/raw_data")
 #   responded_lf ~ payoff_c * dist_to_lf + (1 | subject_id),
 #   data = d_critical, family = binomial
 # )
+
+d_critical <- d |>
+  filter(between_freqs, timed_out == 0, !is.na(responseFreq)) |>
+  mutate(
+    responded_lf = as.numeric(responseFreq == "LF"),
+    time_pressure_c = ifelse(time_pressure == 5, -0.5, 0.5),
+    payoff_c = ifelse(payoff_structure == "linear", -0.5, 0.5)
+  )
+
+cat("Critical trials:", nrow(d_critical), "\n")
+cat("N participants:", n_distinct(d_critical$subject_id), "\n")
+cat("Overall P(LF):", round(mean(d_critical$responded_lf), 3), "\n")
 ```
 
 ```{r model-summaries}
-# summary(m_payoff)
+# Time pressure × distance interaction
+m_tp <- glmer(
+  responded_lf ~ time_pressure_c * dist_to_lf + payoff_c + (1 | subject_id),
+  data = d_critical, family = binomial
+)
+
+# Frequency ratio × distance interaction
+m_freq <- glmer(
+  responded_lf ~ payoff_c * dist_to_lf + time_pressure_c + (1 | subject_id),
+  data = d_critical, family = binomial
+)
+
+tp_coef <- summary(m_tp)$coefficients["time_pressure_c:dist_to_lf", ]
+freq_coef <- summary(m_freq)$coefficients["payoff_c:dist_to_lf", ]
 ```
 
 # Figure: Payoff Effect
 
 ```{r fig-setup}
+# Bin data for plotting
 n_bins <- 9
 
+# Common plot theme
 theme_fig <- theme_minimal(base_size = 12) +
   theme(
     legend.position = c(0.75, 0.85),
@@ -100,22 +200,121 @@ theme_fig <- theme_minimal(base_size = 12) +
 ```
 
 ```{r fig-payoff, fig.width=5, fig.height=4}
-# TODO: Create figure with tidyboot CIs and model predictions
+# Panel A: Time Pressure effect
+d_binned_tp <- d_critical |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(time_pressure, dist_bin) |>
+  tidyboot_mean(responded_lf) |>
+  left_join(
+    d_critical |>
+      mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+      group_by(time_pressure, dist_bin) |>
+      summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
+    by = c("time_pressure", "dist_bin")
+  )
+
+# Model predictions
+pred_tp <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  time_pressure_c = c(-0.5, 0.5),
+  payoff_c = 0
+) |>
+  mutate(
+    time_pressure = ifelse(time_pressure_c < 0, 5, 10),
+    p_lf = predict(m_tp, newdata = pick(everything()), type = "response", re.form = NA)
+  )
+
+p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
+  geom_line(data = pred_tp, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Time Pressure", title = "A") +
+  theme_fig
+
+
+p_tp
 ```
+
+```{r}
+# Panel B: Frequency Ratio effect
+d_binned_freq <- d_critical |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(payoff_structure, dist_bin) |>
+  tidyboot_mean(responded_lf) |>
+  left_join(
+    d_critical |>
+      mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+      group_by(payoff_structure, dist_bin) |>
+      summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
+    by = c("payoff_structure", "dist_bin")
+  )
+
+# Model predictions
+pred_freq <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  payoff_c = c(-0.5, 0.5),
+  time_pressure_c = 0
+) |>
+  mutate(
+    payoff_structure = ifelse(payoff_c < 0, "linear", "binary"),
+    p_lf = predict(m_freq, newdata = pick(everything()), type = "response", re.form = NA)
+  )
+
+p_freq <- ggplot(d_binned_freq, aes(x = dist_mean, y = empirical_stat, color = payoff_structure)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
+  geom_line(data = pred_freq, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = colors_payoff) +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Payoff Structure", title = "B") +
+  theme_fig
+p_freq
+```
+
+```{r fig-combined, fig.width=10, fig.height=4}
+#| fig-cap: "P(LF) by distance from LF prototype"
+
+p_combined <- p_tp + p_freq
+p_combined
+
+ggsave(file.path(fig_path, "empirical_results_exp2.pdf"), p_combined,
+       width = 10, height = 4, dpi = 300)
+```
+
 
 # Response Time Analysis
 
 ```{r rt-summary}
-# TODO: RT by condition
+d_critical |>
+  group_by(time_pressure, responseFreq) |>
+  summarise(M = mean(rt), SD = sd(rt), n = n(), .groups = "drop") |>
+  knitr::kable(digits = 0, col.names = c("Time Pressure", "Response", "M RT", "SD", "N"))
 ```
 
 ```{r rt-model}
-# TODO: RT model
+m_rt <- lmer(
+  log(rt) ~ responded_lf * dist_to_lf * payoff_c + (1 | subject_id),
+  data = d_critical
+)
+summary(m_rt)
 ```
 
 # Summary
 
 ```{r summary}
 cat("=== EXPERIMENT 2 SUMMARY ===\n\n")
-cat("Awaiting data collection...\n")
+cat("N =", n_participants, "participants\n")
+cat("N =", nrow(d_critical), "critical trials\n\n")
+cat("Timeout rates:\n")
+cat(sprintf("  Strict (5s): %.1f%%\n", timeout_by_tp$pct_timeout[1]))
+cat(sprintf("  Lenient (10s): %.1f%%\n", timeout_by_tp$pct_timeout[2]))
+cat("\nKey interactions:\n")
+cat(sprintf("  Time pressure x distance: B = %.3f, z = %.2f\n", tp_coef["Estimate"], tp_coef["z value"]))
+cat(sprintf("  Frequency ratio x distance: B = %.3f, z = %.2f\n", freq_coef["Estimate"], freq_coef["z value"]))
 ```
