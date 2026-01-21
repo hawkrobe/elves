@@ -15,6 +15,7 @@ execute:
 
 ```{r setup}
 library(tidyverse)
+library(tidyboot)
 library(lme4)
 library(lmerTest)
 library(here)
@@ -194,11 +195,13 @@ theme_fig <- theme_minimal(base_size = 12) +
 d_binned_tp <- d_critical |>
   mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
   group_by(time_pressure, dist_bin) |>
-  summarise(
-    p_lf = mean(responded_lf),
-    se = sqrt(p_lf * (1 - p_lf) / n()),
-    dist_mean = mean(dist_to_lf),
-    .groups = "drop"
+  tidyboot_mean(responded_lf) |>
+  left_join(
+    d_critical |>
+      mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+      group_by(time_pressure, dist_bin) |>
+      summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
+    by = c("time_pressure", "dist_bin")
   )
 
 # Model predictions
@@ -212,9 +215,9 @@ pred_tp <- expand.grid(
     p_lf = predict(m_tp, newdata = pick(everything()), type = "response", re.form = NA)
   )
 
-p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = p_lf, color = factor(time_pressure))) +
+p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
   geom_point(size = 3) +
-  geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
   geom_line(data = pred_tp, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
   scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
@@ -229,11 +232,13 @@ p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = p_lf, color = factor(time_pre
 d_binned_freq <- d_critical |>
   mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
   group_by(frequency_ratio, dist_bin) |>
-  summarise(
-    p_lf = mean(responded_lf),
-    se = sqrt(p_lf * (1 - p_lf) / n()),
-    dist_mean = mean(dist_to_lf),
-    .groups = "drop"
+  tidyboot_mean(responded_lf) |>
+  left_join(
+    d_critical |>
+      mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+      group_by(frequency_ratio, dist_bin) |>
+      summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
+    by = c("frequency_ratio", "dist_bin")
   )
 
 # Model predictions
@@ -247,9 +252,9 @@ pred_freq <- expand.grid(
     p_lf = predict(m_freq, newdata = pick(everything()), type = "response", re.form = NA)
   )
 
-p_freq <- ggplot(d_binned_freq, aes(x = dist_mean, y = p_lf, color = frequency_ratio)) +
+p_freq <- ggplot(d_binned_freq, aes(x = dist_mean, y = empirical_stat, color = frequency_ratio)) +
   geom_point(size = 3) +
-  geom_errorbar(aes(ymin = p_lf - se, ymax = p_lf + se), width = 1) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
   geom_line(data = pred_freq, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
   scale_color_manual(values = colors_freq) +
