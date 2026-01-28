@@ -13,6 +13,7 @@ execute:
   message: false
 ---
 
+
 ```{r setup}
 library(tidyverse)
 library(tidyboot)
@@ -33,22 +34,48 @@ fig_path <- here("latex/figures")
 # Data Preprocessing
 
 ```{r load-data}
-# TODO: Update path once data collected
-raw_data_path <- here("data/full-production/raw_data/run-2")
-raw_files <- list.files(raw_data_path, full.names = TRUE) |>
-  str_subset("training_complete", negate = TRUE)
+# Load data from two sources:
+# - exp2-0: binary payoff conditions (original data)
+# - exp2-1: linear payoff conditions (rerun with 100 participants)
 
 cols_needed <- c("subject_id", "frequency_ratio", "time_pressure","payoff_structure", "survey_difficulty",
                  "is_correct", "response", "response_text", "target", "angle", "targetFreq",
-                 "rt", "nearest_trained_angle", "timed_out")
+                 "rt", "nearest_trained_angle", "timed_out", "total_points", "prolific_id")
 
-raw_data <- map_dfr(raw_files, \(f) {
+# Load binary conditions from exp2-0
+binary_data_path <- here("data/full-production/raw_data/exp2-0")
+binary_files <- list.files(binary_data_path, full.names = TRUE) |>
+  str_subset("training_complete", negate = TRUE)
+
+raw_data_binary <- map_dfr(binary_files, \(f) {
   read_csv(f, show_col_types = FALSE) |>
     select(any_of(cols_needed)) |>
     mutate(across(everything(), as.character))
-})
-cat("Loaded", n_distinct(raw_data$subject_id), "participants\n")
+}) |>
+  filter(payoff_structure == "binary")
 
+cat("Loaded", n_distinct(raw_data_binary$subject_id), "participants from binary conditions (exp2-0)\n")
+
+# Load linear conditions from exp2-1 (rerun)
+linear_data_path <- here("data/full-production/raw_data/exp2-1")
+linear_files <- list.files(linear_data_path, full.names = TRUE) |>
+  str_subset("training_complete", negate = TRUE)
+
+raw_data_linear <- map_dfr(linear_files, \(f) {
+  read_csv(f, show_col_types = FALSE) |>
+    select(any_of(cols_needed)) |>
+    mutate(across(everything(), as.character))
+}) |>
+  filter(payoff_structure == "linear")
+
+cat("Loaded", n_distinct(raw_data_linear$subject_id), "participants from linear conditions (exp2-1 rerun)\n")
+
+# Combine both datasets
+raw_data <- bind_rows(raw_data_binary, raw_data_linear)
+cat("Total:", n_distinct(raw_data$subject_id), "participants\n")
+
+participant_bonus <- raw_data |> 
+  filter(is.na(prolific_id))
 ```
 
 ```{r extract-data}
@@ -76,11 +103,21 @@ production <- raw_data |>
     angle = as.numeric(angle),
     targetFreq,
     nearest_trained_angle = as.numeric(nearest_trained_angle),
-    timed_out = as.numeric(timed_out),
-    distance = nearest_trained_angle - angle,
-    # Next-nearest is 45° away, opposite direction from nearest
-    next_nearest_angle = (nearest_trained_angle + ifelse(distance > 0, -45, 45)) %% 360
-  )
+    timed_out = as.numeric(timed_out)
+  ) |>
+  mutate(
+    # Circular distance to nearest (handles 0°/360° wraparound)
+    distance = pmin(abs(angle - nearest_trained_angle), 360 - abs(angle - nearest_trained_angle)),
+    # Compute both potential neighbors (±45° from nearest)
+    neighbor_plus = (nearest_trained_angle + 45) %% 360,
+    neighbor_minus = (nearest_trained_angle - 45 + 360) %% 360,
+    # Circular distance to each neighbor
+    dist_plus = pmin(abs(angle - neighbor_plus), 360 - abs(angle - neighbor_plus)),
+    dist_minus = pmin(abs(angle - neighbor_minus), 360 - abs(angle - neighbor_minus)),
+    # Next-nearest is the closer neighbor (handles 0°/360° wraparound)
+    next_nearest_angle = ifelse(dist_plus < dist_minus, neighbor_plus, neighbor_minus)
+  ) |>
+  select(-neighbor_plus, -neighbor_minus, -dist_plus, -dist_minus)
 ```
 
 ```{r join-frequencies}
@@ -89,8 +126,8 @@ angle_freq_lookup <- angle_mappings |>
   select(subject_id, angle, freq = targetFreq, label = target)
 
 # Join frequency labels for nearest, next-nearest, and response
-d <- production |>
-  left_join(angle_freq_lookup |> rename(nearestAngle = angle, nearestFreq = freq),
+d_exp2 <- production |>
+  left_join(angle_freq_lookup |> rename(nearestAngle = angle, nearestFreq = freq, nearestLabel = label),
             by = c("subject_id", "nearest_trained_angle" = "nearestAngle")) |>
   left_join(angle_freq_lookup |> rename(nextNearestFreq = freq, nextNearestLabel = label),
             by = c("subject_id", "next_nearest_angle" = "angle")) |>
@@ -99,16 +136,25 @@ d <- production |>
   left_join(participants, by = "subject_id") |>
   mutate(
     between_freqs = nearestFreq != nextNearestFreq,
+    # Ambiguous trial: test angle is past midpoint (>11° from nearest, toward next-nearest)
+    ambig_trial = distance > 11,
+    # Critical trial: between HF/LF frequencies AND in ambiguous zone
+    is_critical = between_freqs & ambig_trial,
     # Distance to LF word (key predictor)
+    # distance is already circular, and next_nearest uses circular distance
     dist_to_lf = ifelse(
       nearestFreq == "LF",
-      abs(distance),
+      distance,
       pmin(abs(angle - next_nearest_angle), 360 - abs(angle - next_nearest_angle))
-    )
+    ),
+    # LF word label for this trial (for random effects)
+    lf_word = ifelse(nearestFreq == "LF", nearestLabel, nextNearestLabel)
   )
 
-cat("Total trials:", nrow(d), "\n")
-cat("Between-frequency trials:", sum(d$between_freqs, na.rm = TRUE), "\n")
+cat("Total trials:", nrow(d_exp2), "\n")
+cat("Between-frequency trials:", sum(d_exp2$between_freqs, na.rm = TRUE), "\n")
+cat("Ambiguous trials:", sum(d_exp2$ambig_trial, na.rm = TRUE), "\n")
+cat("Critical trials:", sum(d_exp2$is_critical, na.rm = TRUE), "\n")
 ```
 
 # Sample Descriptives
@@ -117,10 +163,7 @@ cat("Between-frequency trials:", sum(d$between_freqs, na.rm = TRUE), "\n")
 n_participants <- n_distinct(participants$subject_id)
 
 participants |>
-  count(time_pressure, payoff_structure) |>
-  pivot_wider(names_from = payoff_structure, values_from = n) |>
-  knitr::kable(col.names = c("Time Pressure (s)", "1:2", "1:4"),
-               caption = sprintf("Participants per condition (N = %d)", n_participants))
+  count(time_pressure, payoff_structure)
 ```
 
 ```{r timeout-rates}
@@ -130,8 +173,7 @@ participants |>
 # Critical Trial Selection
 
 ```{r filter-critical}
-# TODO: Filter to between-frequency trials, create contrast codes
-timeout_by_tp <- d |>
+timeout_by_tp_exp2 <- d_exp2 |>
   group_by(time_pressure) |>
   summarise(
     n_trials = n(),
@@ -140,47 +182,222 @@ timeout_by_tp <- d |>
     .groups = "drop"
   )
 
-knitr::kable(timeout_by_tp, digits = 1,
+knitr::kable(timeout_by_tp_exp2, digits = 1,
              col.names = c("Time Pressure (s)", "N Trials", "N Timeouts", "% Timeout"))
 ```
 
 # Statistical Models
 
 ```{r models}
-# TODO: Fit models
-# m_payoff <- glmer(
-#   responded_lf ~ payoff_c * dist_to_lf + (1 | subject_id),
-#   data = d_critical, family = binomial
-# )
-
-d_critical <- d |>
+d_critical_exp2 <- d_exp2 |>
   filter(between_freqs, timed_out == 0, !is.na(responseFreq)) |>
   mutate(
     responded_lf = as.numeric(responseFreq == "LF"),
     time_pressure_c = ifelse(time_pressure == 5, -0.5, 0.5),
-    payoff_c = ifelse(payoff_structure == "linear", -0.5, 0.5)
+    payoff_c = ifelse(payoff_structure == "linear", -0.5, 0.5),
+    dist_to_lf_scaled = scale(dist_to_lf)[,1]
   )
 
-cat("Critical trials:", nrow(d_critical), "\n")
-cat("N participants:", n_distinct(d_critical$subject_id), "\n")
-cat("Overall P(LF):", round(mean(d_critical$responded_lf), 3), "\n")
+cat("Critical trials:", nrow(d_critical_exp2), "\n")
+cat("N participants:", n_distinct(d_critical_exp2$subject_id), "\n")
+cat("N unique LF words:", n_distinct(d_critical_exp2$lf_word), "\n")
+cat("Overall P(LF):", round(mean(d_critical_exp2$responded_lf), 3), "\n")
 ```
 
 ```{r model-summaries}
 # Time pressure × distance interaction
-m_tp <- glmer(
-  responded_lf ~ time_pressure_c * dist_to_lf + payoff_c + (1 | subject_id),
-  data = d_critical, family = binomial
+# Random effects: by-participant intercepts and slopes for distance (uncorrelated), by-word intercepts
+m_tp_exp2 <- glmer(
+  responded_lf ~ time_pressure_c * dist_to_lf_scaled + payoff_c + 
+    (1 + dist_to_lf_scaled | subject_id) + (1 | lf_word),
+  data = d_critical_exp2, family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
 )
 
-# Frequency ratio × distance interaction
-m_freq <- glmer(
-  responded_lf ~ payoff_c * dist_to_lf + time_pressure_c + (1 | subject_id),
-  data = d_critical, family = binomial
+# Payoff structure × distance interaction
+m_payoff_exp2 <- glmer(
+  responded_lf ~ payoff_c * dist_to_lf_scaled + time_pressure_c + 
+    (1 + dist_to_lf_scaled | subject_id) + (1 | lf_word),
+  data = d_critical_exp2, family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
 )
 
-tp_coef <- summary(m_tp)$coefficients["time_pressure_c:dist_to_lf", ]
-freq_coef <- summary(m_freq)$coefficients["payoff_c:dist_to_lf", ]
+tp_coef_exp2 <- summary(m_tp_exp2)$coefficients["time_pressure_c:dist_to_lf_scaled", ]
+payoff_coef_exp2 <- summary(m_payoff_exp2)$coefficients["payoff_c:dist_to_lf_scaled", ]
+
+summary(m_tp_exp2)
+summary(m_payoff_exp2)
+```
+
+# Model: Chose Nearest by Target Frequency
+
+This analysis examines whether participants chose the nearest trained angle as a function of whether that angle was HF or LF.
+
+```{r model-chose-nearest}
+# Prepare data for chose-nearest analysis
+d_chose_nearest_exp2 <- d_exp2 |>
+  filter(between_freqs, timed_out == 0, !is.na(responseFreq)) |>
+  mutate(
+    # Outcome: did participant respond with the nearest trained angle's word?
+    chose_nearest = as.numeric(response_text == nearestLabel),
+    # Predictor: is the nearest angle HF? (centered: -0.5 = LF, 0.5 = HF)
+    is_hf_trial_c = ifelse(nearestFreq == "HF", 0.5, -0.5),
+    # Centered predictors
+    time_pressure_c = ifelse(time_pressure == 5, -0.5, 0.5),
+    payoff_c = ifelse(payoff_structure == "linear", -0.5, 0.5),
+    distance_c = scale(distance)[,1]
+  )
+
+cat("Chose-nearest analysis:\n")
+cat("  N trials:", nrow(d_chose_nearest_exp2), "\n")
+cat("  N participants:", n_distinct(d_chose_nearest_exp2$subject_id), "\n")
+cat("  Overall P(chose nearest):", round(mean(d_chose_nearest_exp2$chose_nearest), 3), "\n")
+cat("  P(chose nearest | HF nearest):", round(mean(d_chose_nearest_exp2$chose_nearest[d_chose_nearest_exp2$nearestFreq == "HF"]), 3), "\n")
+cat("  P(chose nearest | LF nearest):", round(mean(d_chose_nearest_exp2$chose_nearest[d_chose_nearest_exp2$nearestFreq == "LF"]), 3), "\n")
+```
+
+```{r model-chose-nearest-fit}
+# Full model: is_hf_trial × payoff × time_pressure interaction + distance
+# Note: frequency_ratio is constant (1:4) across all participants, so using payoff_c instead
+m_chose_nearest_exp2 <- glmer(
+  chose_nearest ~ is_hf_trial_c * payoff_c * time_pressure_c + distance_c +
+    (1 + distance_c | subject_id) + (1 | nearestLabel),
+  data = d_chose_nearest_exp2, family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_chose_nearest_exp2)
+```
+
+
+```{r chose-nearest-by-distance, fig.width=5, fig.height=4}
+# Plot P(chose nearest) by distance, split by HF/LF nearest
+n_bins <- 9  # Define here for use in binning
+
+# Filter to 0-22.5 range and bin
+d_binned_chose_nearest <- d_chose_nearest_exp2 |>
+  filter(distance <= 22.5) |>
+  mutate(dist_bin = cut(distance, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(nearestFreq, time_pressure, dist_bin) |>
+  tidyboot_mean(chose_nearest) |>
+  left_join(
+    d_chose_nearest_exp2 |>
+      filter(distance <= 22.5) |>
+      mutate(dist_bin = cut(distance, breaks = n_bins, include.lowest = TRUE)) |>
+      group_by(nearestFreq, time_pressure, dist_bin) |>
+      summarise(dist_mean = mean(distance), .groups = "drop"),
+    by = c("nearestFreq", "time_pressure", "dist_bin")
+  )
+
+# Model predictions for the curve
+# Get scaling parameters from the data used to fit the model
+dist_mean_cn <- mean(d_chose_nearest_exp2$distance)
+dist_sd_cn <- sd(d_chose_nearest_exp2$distance)
+
+pred_chose_nearest <- expand.grid(
+  distance = seq(0, 22.5, length.out = 100),
+  is_hf_trial_c = c(-0.5, 0.5),
+  time_pressure_c = c(-0.5, 0.5),
+  payoff_c = 0  # Average across payoff conditions
+) |>
+  mutate(
+    distance_c = (distance - dist_mean_cn) / dist_sd_cn,
+    nearestFreq = ifelse(is_hf_trial_c > 0, "HF", "LF"),
+    time_pressure = ifelse(time_pressure_c < 0, 5, 10),
+    p_chose_nearest = predict(m_chose_nearest_exp2, newdata = pick(everything()), 
+                               type = "response", re.form = NA)
+  )
+
+ggplot(d_binned_chose_nearest, aes(x = dist_mean, y = empirical_stat, 
+                                    color = nearestFreq, shape = factor(time_pressure))) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.5) +
+  geom_line(data = pred_chose_nearest, 
+            aes(x = distance, y = p_chose_nearest, linetype = factor(time_pressure)),
+            linewidth = 1) +
+  scale_color_manual(values = c("HF" = "#E94F37", "LF" = "#2E86AB")) +
+  scale_linetype_manual(values = c("5" = "solid", "10" = "dashed"),
+                        labels = c("5s (Strict)", "10s (Lenient)")) +
+  scale_shape_manual(values = c("5" = 16, "10" = 17),
+                     labels = c("5s (Strict)", "10s (Lenient)")) +
+  scale_x_continuous(limits = c(0, 22.5), breaks = seq(0, 22.5, by = 5)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(
+    x = "Distance from Nearest Trained Angle (deg)",
+    y = "P(Chose Nearest)",
+    color = "Nearest Freq",
+    shape = "Time Pressure",
+    linetype = "Time Pressure",
+    title = "Exp 2: P(Chose Nearest) by Distance and Target Frequency (Time Pressure)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "gray80")
+  )
+```
+
+```{r chose-nearest-by-distance-payoff, fig.width=5, fig.height=4}
+# Plot P(chose nearest) by distance, split by HF/LF nearest and PAYOFF structure
+n_bins_payoff <- 9
+
+# Filter to 0-22.5 range and bin by payoff structure
+d_binned_chose_nearest_payoff <- d_chose_nearest_exp2 |>
+  filter(distance <= 22.5) |>
+  mutate(dist_bin = cut(distance, breaks = n_bins_payoff, include.lowest = TRUE)) |>
+  group_by(nearestFreq, payoff_structure, dist_bin) |>
+  tidyboot_mean(chose_nearest) |>
+  left_join(
+    d_chose_nearest_exp2 |>
+      filter(distance <= 22.5) |>
+      mutate(dist_bin = cut(distance, breaks = n_bins_payoff, include.lowest = TRUE)) |>
+      group_by(nearestFreq, payoff_structure, dist_bin) |>
+      summarise(dist_mean = mean(distance), .groups = "drop"),
+    by = c("nearestFreq", "payoff_structure", "dist_bin")
+  )
+
+# Model predictions for payoff effect
+pred_chose_nearest_payoff <- expand.grid(
+  distance = seq(0, 22.5, length.out = 100),
+  is_hf_trial_c = c(-0.5, 0.5),
+  payoff_c = c(-0.5, 0.5),
+  time_pressure_c = 0  # Average across time pressure conditions
+) |>
+  mutate(
+    distance_c = (distance - dist_mean_cn) / dist_sd_cn,
+    nearestFreq = ifelse(is_hf_trial_c > 0, "HF", "LF"),
+    payoff_structure = ifelse(payoff_c < 0, "linear", "binary"),
+    p_chose_nearest = predict(m_chose_nearest_exp2, newdata = pick(everything()), 
+                               type = "response", re.form = NA)
+  )
+
+ggplot(d_binned_chose_nearest_payoff, aes(x = dist_mean, y = empirical_stat, 
+                                    color = nearestFreq, shape = payoff_structure)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.5) +
+  geom_line(data = pred_chose_nearest_payoff, 
+            aes(x = distance, y = p_chose_nearest, linetype = payoff_structure),
+            linewidth = 1) +
+  scale_color_manual(values = c("HF" = "#E94F37", "LF" = "#2E86AB")) +
+  scale_linetype_manual(values = c("linear" = "solid", "binary" = "dashed"),
+                        labels = c("Linear", "Binary")) +
+  scale_shape_manual(values = c("linear" = 16, "binary" = 17),
+                     labels = c("Linear", "Binary")) +
+  scale_x_continuous(limits = c(0, 22.5), breaks = seq(0, 22.5, by = 5)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(
+    x = "Distance from Nearest Trained Angle (deg)",
+    y = "P(Chose Nearest)",
+    color = "Nearest Freq",
+    shape = "Payoff Structure",
+    linetype = "Payoff Structure",
+    title = "Exp 2: P(Chose Nearest) by Distance and Target Frequency (Payoff)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "gray80")
+  )
 ```
 
 # Figure: Payoff Effect
@@ -201,12 +418,12 @@ theme_fig <- theme_minimal(base_size = 12) +
 
 ```{r fig-payoff, fig.width=5, fig.height=4}
 # Panel A: Time Pressure effect
-d_binned_tp <- d_critical |>
+d_binned_tp_exp2 <- d_critical_exp2 |>
   mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
   group_by(time_pressure, dist_bin) |>
   tidyboot_mean(responded_lf) |>
   left_join(
-    d_critical |>
+    d_critical_exp2 |>
       mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
       group_by(time_pressure, dist_bin) |>
       summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
@@ -214,20 +431,25 @@ d_binned_tp <- d_critical |>
   )
 
 # Model predictions
-pred_tp <- expand.grid(
+# Need to scale dist_to_lf using the same scaling parameters from the data
+dist_mean_exp2 <- mean(d_critical_exp2$dist_to_lf)
+dist_sd_exp2 <- sd(d_critical_exp2$dist_to_lf)
+
+pred_tp_exp2 <- expand.grid(
   dist_to_lf = seq(0, 45, length.out = 100),
   time_pressure_c = c(-0.5, 0.5),
   payoff_c = 0
 ) |>
   mutate(
+    dist_to_lf_scaled = (dist_to_lf - dist_mean_exp2) / dist_sd_exp2,
     time_pressure = ifelse(time_pressure_c < 0, 5, 10),
-    p_lf = predict(m_tp, newdata = pick(everything()), type = "response", re.form = NA)
+    p_lf = predict(m_tp_exp2, newdata = pick(everything()), type = "response", re.form = NA)
   )
 
-p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
+p_tp_exp2 <- ggplot(d_binned_tp_exp2, aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
   geom_point(size = 3) +
   geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
-  geom_line(data = pred_tp, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_line(data = pred_tp_exp2, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
   scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
   scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
@@ -236,17 +458,17 @@ p_tp <- ggplot(d_binned_tp, aes(x = dist_mean, y = empirical_stat, color = facto
   theme_fig
 
 
-p_tp
+p_tp_exp2
 ```
 
 ```{r}
-# Panel B: Frequency Ratio effect
-d_binned_freq <- d_critical |>
+# Panel B: Payoff Structure effect
+d_binned_payoff_exp2 <- d_critical_exp2 |>
   mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
   group_by(payoff_structure, dist_bin) |>
   tidyboot_mean(responded_lf) |>
   left_join(
-    d_critical |>
+    d_critical_exp2 |>
       mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
       group_by(payoff_structure, dist_bin) |>
       summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
@@ -254,55 +476,135 @@ d_binned_freq <- d_critical |>
   )
 
 # Model predictions
-pred_freq <- expand.grid(
+pred_payoff_exp2 <- expand.grid(
   dist_to_lf = seq(0, 45, length.out = 100),
   payoff_c = c(-0.5, 0.5),
   time_pressure_c = 0
 ) |>
   mutate(
+    dist_to_lf_scaled = (dist_to_lf - dist_mean_exp2) / dist_sd_exp2,
     payoff_structure = ifelse(payoff_c < 0, "linear", "binary"),
-    p_lf = predict(m_freq, newdata = pick(everything()), type = "response", re.form = NA)
+    p_lf = predict(m_payoff_exp2, newdata = pick(everything()), type = "response", re.form = NA)
   )
 
-p_freq <- ggplot(d_binned_freq, aes(x = dist_mean, y = empirical_stat, color = payoff_structure)) +
+p_payoff_exp2 <- ggplot(d_binned_payoff_exp2, aes(x = dist_mean, y = empirical_stat, color = payoff_structure)) +
   geom_point(size = 3) +
   geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
-  geom_line(data = pred_freq, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_line(data = pred_payoff_exp2, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
   scale_color_manual(values = colors_payoff) +
   scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
   labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Payoff Structure", title = "B") +
   theme_fig
-p_freq
+p_payoff_exp2
 ```
 
 ```{r fig-combined, fig.width=10, fig.height=4}
 #| fig-cap: "P(LF) by distance from LF prototype"
 
-p_combined <- p_tp + p_freq
-p_combined
+p_combined_exp2 <- p_tp_exp2 + p_payoff_exp2
+p_combined_exp2
 
-ggsave(file.path(fig_path, "empirical_results_exp2.pdf"), p_combined,
+ggsave(file.path(fig_path, "empirical_results_exp2.pdf"), p_combined_exp2,
        width = 10, height = 4, dpi = 300)
 ```
 
+# Combined Model: Time Pressure × Payoff Structure
+
+```{r model-combined}
+# Full model with both two-way interactions
+# Random effects: by-participant intercepts and slopes for distance (uncorrelated), by-word intercepts
+m_combined_exp2 <- glmer(
+  responded_lf ~ (time_pressure_c + payoff_c) * dist_to_lf_scaled + 
+    (1 + dist_to_lf_scaled | subject_id) + (1 | lf_word),
+  data = d_critical_exp2, family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+summary(m_combined_exp2)
+```
+
+```{r fig-combined-plot, fig.width=6, fig.height=5}
+#| fig-cap: "Combined effects of time pressure and payoff structure"
+
+# Bin data by both factors
+d_binned_combined_exp2 <- d_critical_exp2 |>
+  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+  group_by(time_pressure, payoff_structure, dist_bin) |>
+  tidyboot_mean(responded_lf) |>
+  left_join(
+    d_critical_exp2 |>
+      mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
+      group_by(time_pressure, payoff_structure, dist_bin) |>
+      summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
+    by = c("time_pressure", "payoff_structure", "dist_bin")
+  )
+
+# Model predictions for all condition combinations
+pred_combined_exp2 <- expand.grid(
+  dist_to_lf = seq(0, 45, length.out = 100),
+  time_pressure_c = c(-0.5, 0.5),
+  payoff_c = c(-0.5, 0.5)
+) |>
+  mutate(
+    dist_to_lf_scaled = (dist_to_lf - dist_mean_exp2) / dist_sd_exp2,
+    time_pressure = ifelse(time_pressure_c < 0, 5, 10),
+    payoff_structure = ifelse(payoff_c < 0, "linear", "binary"),
+    p_lf = predict(m_combined_exp2, newdata = pick(everything()), type = "response", re.form = NA)
+  )
+
+# Create plot with color = payoff, linetype = time pressure
+p_combined_effects_exp2 <- ggplot() +
+  geom_point(data = d_binned_combined_exp2, 
+             aes(x = dist_mean, y = empirical_stat, 
+                 color = payoff_structure, shape = factor(time_pressure)),
+             size = 2.5, alpha = 0.7) +
+  geom_line(data = pred_combined_exp2, 
+            aes(x = dist_to_lf, y = p_lf, 
+                color = payoff_structure, linetype = factor(time_pressure)),
+            linewidth = 1) +
+  geom_vline(xintercept = 22.5, linetype = "dotted", color = "gray50") +
+  scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(x = "Distance from LF (deg)", y = "P(LF)") +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "right",
+    legend.background = element_rect(fill = "white", color = "gray80"),
+    panel.grid.minor = element_blank()
+  )
+
+p_combined_effects_exp2
+
+ggsave(file.path(fig_path, "combined_effects_exp2.pdf"), p_combined_effects_exp2,
+       width = 7, height = 5, dpi = 300)
+```
 
 # Response Time Analysis
 
 ```{r rt-summary}
-d_critical |>
+d_critical_exp2 |>
   group_by(time_pressure, responseFreq) |>
   summarise(M = mean(rt), SD = sd(rt), n = n(), .groups = "drop") |>
   knitr::kable(digits = 0, col.names = c("Time Pressure", "Response", "M RT", "SD", "N"))
 ```
 
+```{r rt-summary-payoff}
+d_critical_exp2 |>
+  group_by(payoff_structure, responseFreq) |>
+  summarise(M = mean(rt), SD = sd(rt), n = n(), .groups = "drop") |>
+  knitr::kable(digits = 0, col.names = c("Reward Structure", "Response", "M RT", "SD", "N"))
+```
+
 ```{r rt-model}
-m_rt <- lmer(
-  log(rt) ~ responded_lf * dist_to_lf * payoff_c + (1 | subject_id),
-  data = d_critical
+m_rt_exp2 <- lmer(
+  log(rt) ~ responded_lf * dist_to_lf_scaled * payoff_c + 
+    (1 + dist_to_lf_scaled | subject_id) + (1 | lf_word),
+  data = d_critical_exp2,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
 )
-summary(m_rt)
+summary(m_rt_exp2)
 ```
 
 # Summary
@@ -310,11 +612,286 @@ summary(m_rt)
 ```{r summary}
 cat("=== EXPERIMENT 2 SUMMARY ===\n\n")
 cat("N =", n_participants, "participants\n")
-cat("N =", nrow(d_critical), "critical trials\n\n")
+cat("N =", nrow(d_critical_exp2), "critical trials\n")
+cat("N =", n_distinct(d_critical_exp2$lf_word), "unique LF words\n\n")
 cat("Timeout rates:\n")
-cat(sprintf("  Strict (5s): %.1f%%\n", timeout_by_tp$pct_timeout[1]))
-cat(sprintf("  Lenient (10s): %.1f%%\n", timeout_by_tp$pct_timeout[2]))
-cat("\nKey interactions:\n")
-cat(sprintf("  Time pressure x distance: B = %.3f, z = %.2f\n", tp_coef["Estimate"], tp_coef["z value"]))
-cat(sprintf("  Frequency ratio x distance: B = %.3f, z = %.2f\n", freq_coef["Estimate"], freq_coef["z value"]))
+cat(sprintf("  Strict (5s): %.1f%%\n", timeout_by_tp_exp2$pct_timeout[1]))
+cat(sprintf("  Lenient (10s): %.1f%%\n", timeout_by_tp_exp2$pct_timeout[2]))
+cat("\nKey interactions (scaled distance):\n")
+cat(sprintf("  Time pressure x distance: B = %.3f, z = %.2f, p %s\n", 
+            tp_coef_exp2["Estimate"], tp_coef_exp2["z value"],
+            ifelse(tp_coef_exp2["Pr(>|z|)"] < .001, "< .001", sprintf("= %.3f", tp_coef_exp2["Pr(>|z|)"]))))
+cat(sprintf("  Payoff Condition x distance: B = %.3f, z = %.2f, p %s\n", 
+            payoff_coef_exp2["Estimate"], payoff_coef_exp2["z value"],
+            ifelse(payoff_coef_exp2["Pr(>|z|)"] < .001, "< .001", sprintf("= %.3f", payoff_coef_exp2["Pr(>|z|)"]))))
+```
+
+# Supplementary: Response Proportions by Target Frequency
+
+This analysis examines the proportion of HF, LF, and Other responses as a function of which frequency word is nearest to the target angle. "Other" responses are valid trained words that are neither the nearest nor next-nearest option. Restricted to ambiguous trials (>11° from nearest trained angle) to focus on cases where the target is clearly between two options.
+
+```{r response-proportions-exp2, fig.width=8, fig.height=6}
+# Add response category: nearest, next-nearest, or other valid word
+d_exp2_with_category <- d_exp2 |>
+  filter(between_freqs, ambig_trial, timed_out == 0, !is.na(responseFreq)) |>
+  mutate(
+    response_category = case_when(
+      response_text == nearestLabel ~ nearestFreq,
+      response_text == nextNearestLabel ~ nextNearestFreq,
+      TRUE ~ "Other"
+    )
+  )
+
+# Compute response proportions on ambiguous between-frequency trials (aggregate)
+d_props_exp2 <- d_exp2_with_category |>
+  group_by(nearestFreq, payoff_structure, time_pressure) |>
+  summarise(
+    n = n(),
+    n_lf = sum(response_category == "LF"),
+    n_hf = sum(response_category == "HF"),
+    n_other = sum(response_category == "Other"),
+    prop_lf = n_lf / n,
+    prop_hf = n_hf / n,
+    prop_other = n_other / n,
+    .groups = "drop"
+  )
+
+# By-participant proportions for individual points
+d_props_by_subj_exp2 <- d_exp2_with_category |>
+  group_by(subject_id, nearestFreq, payoff_structure, time_pressure) |>
+  summarise(
+    n = n(),
+    prop_lf = sum(response_category == "LF") / n,
+    prop_hf = sum(response_category == "HF") / n,
+    prop_other = sum(response_category == "Other") / n,
+    .groups = "drop"
+  ) |>
+  pivot_longer(cols = c(prop_lf, prop_hf, prop_other), 
+               names_to = "response_type", 
+               values_to = "proportion") |>
+  mutate(
+    response_type = case_when(
+      response_type == "prop_lf" ~ "LF",
+      response_type == "prop_hf" ~ "HF",
+      response_type == "prop_other" ~ "Other"
+    ),
+    response_type = factor(response_type, levels = c("HF", "LF", "Other")),
+    time_pressure = factor(time_pressure, labels = c("5s (Strict)", "10s (Lenient)")),
+    payoff_structure = factor(payoff_structure, 
+                              levels = c("linear", "binary"),
+                              labels = c("Linear Payoff", "Binary Payoff"))
+  )
+
+# Reshape aggregate for plotting
+d_props_long_exp2 <- d_props_exp2 |>
+  pivot_longer(cols = c(prop_lf, prop_hf, prop_other), 
+               names_to = "response_type", 
+               values_to = "proportion") |>
+  mutate(
+    response_type = case_when(
+      response_type == "prop_lf" ~ "LF",
+      response_type == "prop_hf" ~ "HF",
+      response_type == "prop_other" ~ "Other"
+    ),
+    response_type = factor(response_type, levels = c("HF", "LF", "Other")),
+    time_pressure = factor(time_pressure, labels = c("5s (Strict)", "10s (Lenient)")),
+    payoff_structure = factor(payoff_structure, 
+                              levels = c("linear", "binary"),
+                              labels = c("Linear Payoff", "Binary Payoff"))
+  )
+
+# Plot: Response proportions by nearest frequency with participant points
+ggplot(d_props_long_exp2, aes(x = nearestFreq, y = proportion, fill = response_type)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.6) +
+  geom_point(data = d_props_by_subj_exp2,
+             aes(x = nearestFreq, y = proportion, color = response_type),
+             position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.9),
+             alpha = 0.4, size = 1.5, show.legend = FALSE) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  facet_grid(time_pressure ~ payoff_structure) +
+  scale_fill_manual(values = c("HF" = "#E94F37", "LF" = "#2E86AB", "Other" = "#7D7D7D")) +
+  scale_color_manual(values = c("HF" = "#B33D2B", "LF" = "#1F5F7A", "Other" = "#4D4D4D")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(
+    x = "Nearest Trained Angle Frequency",
+    y = "Proportion of Responses",
+    fill = "Response",
+    title = "Exp 2 Response Proportions",
+    subtitle = "Bars = group means; Points = individual participants; Other = valid word but not nearest/next-nearest"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold")
+  )
+```
+
+```{r response-table-exp2}
+# Summary table
+d_props_exp2 |>
+  mutate(
+    time_pressure = factor(time_pressure, labels = c("5s", "10s"))
+  ) |>
+  knitr::kable(
+    digits = 2,
+    col.names = c("Nearest Freq", "Payoff Structure", "Time Pressure", "N Trials", 
+                  "N LF", "N HF", "N Other", "P(LF)", "P(HF)", "P(Other)"),
+    caption = "Response proportions on ambiguous between-frequency trials"
+  )
+```
+
+# Exploratory: Learning Quality Checks
+
+This section examines accuracy on exact-angle trials (timed production at trained angles) and untimed final recall trials to assess overall learning quality.
+
+```{r load-accuracy-data-exp2}
+# Need trial_type to identify exact_angle trials, and response to identify final-recall
+cols_accuracy <- c("subject_id", "payoff_structure", "time_pressure", "trial_type",
+                   "is_correct", "response", "target", "angle", "targetFreq")
+
+# Load accuracy data from both sources (same split as main data)
+accuracy_data_binary <- map_dfr(binary_files, \(f) {
+  read_csv(f, show_col_types = FALSE) |>
+    select(any_of(cols_accuracy)) |>
+    mutate(across(everything(), as.character))
+}) |>
+  filter(payoff_structure == "binary")
+
+accuracy_data_linear <- map_dfr(linear_files, \(f) {
+  read_csv(f, show_col_types = FALSE) |>
+    select(any_of(cols_accuracy)) |>
+    mutate(across(everything(), as.character))
+}) |>
+  filter(payoff_structure == "linear")
+
+accuracy_data_exp2 <- bind_rows(accuracy_data_binary, accuracy_data_linear)
+
+# Extract exact_angle trials
+exact_angle_exp2 <- accuracy_data_exp2 |>
+  filter(trial_type == "exact_angle") |>
+  transmute(
+    subject_id,
+    is_correct = as.numeric(is_correct),
+    target,
+    angle = as.numeric(angle),
+    targetFreq
+  ) |>
+  left_join(participants, by = "subject_id")
+
+# Extract final recall trials (untimed)
+final_recall_exp2 <- accuracy_data_exp2 |>
+  filter(str_detect(response, "final-recall-response")) |>
+  transmute(
+    subject_id,
+    is_correct = as.numeric(is_correct),
+    target,
+    angle = as.numeric(angle),
+    targetFreq
+  ) |>
+  left_join(participants, by = "subject_id")
+
+cat("Exact angle trials:", nrow(exact_angle_exp2), "\n")
+cat("Final recall trials:", nrow(final_recall_exp2), "\n")
+```
+
+
+
+```{r exact-angle-by-targetfreq-exp2, fig.width=8, fig.height=6}
+# Exact angle trials: accuracy by target frequency (HF vs LF)
+exact_acc_by_freq_exp2 <- exact_angle_exp2 |>
+  group_by(targetFreq, payoff_structure, time_pressure) |>
+  summarise(
+    n_trials = n(),
+    accuracy = mean(is_correct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# By-participant accuracy for individual points
+exact_acc_by_freq_subj_exp2 <- exact_angle_exp2 |>
+  group_by(subject_id, targetFreq, payoff_structure, time_pressure) |>
+  summarise(
+    accuracy = mean(is_correct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(exact_acc_by_freq_exp2, aes(x = targetFreq, y = accuracy, fill = targetFreq)) +
+  geom_col(alpha = 0.6) +
+  geom_point(data = exact_acc_by_freq_subj_exp2,
+             aes(x = targetFreq, y = accuracy, color = targetFreq),
+             position = position_jitter(width = 0.2),
+             alpha = 0.4, size = 1.5, show.legend = FALSE) +
+  facet_grid(time_pressure ~ payoff_structure, 
+             labeller = labeller(
+               time_pressure = c("5" = "5s (Strict)", "10" = "10s (Lenient)"),
+               payoff_structure = c("linear" = "Linear Payoff", "binary" = "Binary Payoff")
+             )) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = c("HF" = "#E94F37", "LF" = "#2E86AB")) +
+  scale_color_manual(values = c("HF" = "#B33D2B", "LF" = "#1F5F7A")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(
+    x = "Target Frequency",
+    y = "Accuracy",
+    fill = "Target Freq",
+    title = "Exp 2: Exact Angle Trial Accuracy by Target Frequency",
+    subtitle = "Timed production at trained angles; Bars = group means; Points = individual participants"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold")
+  )
+```
+
+```{r final-recall-by-targetfreq-exp2, fig.width=8, fig.height=6}
+# Final recall trials: accuracy by target frequency (HF vs LF)
+recall_acc_by_freq_exp2 <- final_recall_exp2 |>
+  group_by(targetFreq, payoff_structure, time_pressure) |>
+  summarise(
+    n_trials = n(),
+    accuracy = mean(is_correct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# By-participant accuracy for individual points
+recall_acc_by_freq_subj_exp2 <- final_recall_exp2 |>
+  group_by(subject_id, targetFreq, payoff_structure, time_pressure) |>
+  summarise(
+    accuracy = mean(is_correct, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(recall_acc_by_freq_exp2, aes(x = targetFreq, y = accuracy, fill = targetFreq)) +
+  geom_col(alpha = 0.6) +
+  geom_point(data = recall_acc_by_freq_subj_exp2,
+             aes(x = targetFreq, y = accuracy, color = targetFreq),
+             position = position_jitter(width = 0.2),
+             alpha = 0.4, size = 1.5, show.legend = FALSE) +
+  facet_grid(time_pressure ~ payoff_structure, 
+             labeller = labeller(
+               time_pressure = c("5" = "5s (Strict)", "10" = "10s (Lenient)"),
+               payoff_structure = c("linear" = "Linear Payoff", "binary" = "Binary Payoff")
+             )) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = c("HF" = "#E94F37", "LF" = "#2E86AB")) +
+  scale_color_manual(values = c("HF" = "#B33D2B", "LF" = "#1F5F7A")) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  labs(
+    x = "Target Frequency",
+    y = "Accuracy",
+    fill = "Target Freq",
+    title = "Exp 2: Final Recall Accuracy by Target Frequency",
+    subtitle = "Untimed production at trained angles; Bars = group means; Points = individual participants"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold")
+  )
+```
+
+```{r accuracy-summary-exp2}
+cat("\n=== ACCURACY SUMMARY (Exp 2) ===\n")
+cat(sprintf("Exact Angle (Timed): %.1f%%\n", 100 * exact_acc_overall_exp2$accuracy))
+cat(sprintf("Final Recall (Untimed): %.1f%%\n", 100 * recall_acc_overall_exp2$accuracy))
 ```
