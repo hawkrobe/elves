@@ -134,14 +134,11 @@ def neg_log_likelihood(params, df):
 
 def fit_model(df):
     """Fit Interaction model using trial-level negative log-likelihood."""
-    x0 = [0.2, 0.5, 0.9, 0.5, 0.15, 4.0, 6.0, 1.5]  # sigma, B_12, B_14, delta, lapse, T_5, T_10, gamma
-    bounds = [
-        (0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0),
-        (0.0, 0.3), (0.1, 30.0), (0.1, 30.0), (-10.0, 10.0),
-    ]
+    x0 = [0.2, 0.5, 0.9, 0.5, 0.15, 4.0, 6.0, 1.5]
 
     print(f"Fitting Interaction model ({len(df):,} trials)...")
-    result = minimize(nll_interaction, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
+    result = minimize(nll_interaction, x0, args=(df,), method='Nelder-Mead',
+                      options={'maxiter': 2000, 'xatol': 1e-4, 'fatol': 1e-4})
 
     param_names = ["sigma", "B_hf_12", "B_hf_14", "delta", "lapse",
                    "T_5", "T_10", "gamma"]
@@ -370,10 +367,6 @@ def main():
     print(f"  1:4: ΔT = {delta_T_14:.2f}")
     print(f"  Ratio: {delta_T_12 / delta_T_14:.2f}x")
     print()
-
-    # Plot
-    print("-" * 70)
-    plot_fit(params, conditions)
 
     # Save parameters
     np.savez("fitted_params.npz", **{k: v for k, v in params.items()
