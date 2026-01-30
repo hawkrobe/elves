@@ -3,26 +3,20 @@ RSA Race Model Fitting
 
 Fits the race model to Experiment 1 data (2x2 design: time pressure × frequency ratio).
 
-Key test: Can the model recover the frequency × time pressure interaction?
-
 Model: A(w, t) = B(w) + δ · M(θ, w) · t
 
 Parameters:
   - Shared across conditions: σ (semantic width), δ (drift rate), λ (lapse)
   - Varies by frequency ratio: B_HF (baseline advantage for HF words)
-  - Varies by condition: T (effective processing time) - separate for each of 4 cells
-
-The critical prediction is that the time pressure effect (ΔT = T_10s - T_5s) should be
-larger for 1:2 than 1:4 frequency ratio, because when HF's baseline advantage is larger,
-extra processing time provides less benefit (VOC prediction).
+  - Varies by condition: T (effective processing time)
 
 Usage:
     python fit.py
 
 Output:
     - Fitted parameters and fit statistics printed to console
-    - race_model_fit.png: Visualization of model fit to all 4 conditions
-    - fitted_params.npz: Saved parameters for use in other scripts
+    - race_model_fit.png: Model fit visualization
+    - fitted_params.npz: Saved parameters
 """
 
 import pandas as pd
@@ -414,6 +408,55 @@ def loss_fn_minimal(params, conditions):
     return total_loss / total_n
 
 
+def loss_fn_interaction(params, conditions):
+    """
+    Interaction model: T parameterized with interaction term (8 params).
+
+    T(tp, fr) structure:
+      - T_5:  base processing time at 5s deadline (for 1:2)
+      - T_10: base processing time at 10s deadline (for both)
+      - γ:    offset for 1:4 at 5s (captures early saturation)
+
+    So: T(5, 1:2) = T_5
+        T(5, 1:4) = T_5 + γ
+        T(10, 1:2) = T_10
+        T(10, 1:4) = T_10
+
+    This captures the freq × time pressure interaction with one parameter.
+    """
+    sigma, B_hf_12, B_hf_14, delta, lapse, T_5, T_10, gamma = params
+
+    if sigma <= 0.05 or sigma > 2.0:
+        return 1e10
+    if delta <= 0 or delta > 50:
+        return 1e10
+    if lapse < 0 or lapse > 0.5:
+        return 1e10
+    if T_5 <= 0 or T_10 <= 0:
+        return 1e10
+
+    # T structure with interaction
+    T_map = {
+        (5, "1:2"): T_5,
+        (5, "1:4"): T_5 + gamma,
+        (10, "1:2"): T_10,
+        (10, "1:4"): T_10,
+    }
+    B_map = {"1:2": B_hf_12, "1:4": B_hf_14}
+
+    total_loss, total_n = 0, 0
+    for (tp, fr), data in conditions.items():
+        T, B_hf = T_map[(tp, fr)], B_map[fr]
+        for _, row in data.iterrows():
+            try:
+                pred = predict_p_lf(row["theta_mean"], sigma, B_hf, delta, T, lapse)
+            except (ValueError, RuntimeError):
+                return 1e10
+            total_loss += row["n"] * (pred - row["p_lf"]) ** 2
+            total_n += row["n"]
+    return total_loss / total_n
+
+
 def fit_model_comparison(conditions):
     """Fit all model variants and compare using AIC/BIC."""
     # Count total observations
@@ -456,6 +499,15 @@ def fit_model_comparison(conditions):
     result = differential_evolution(loss_fn_minimal, bounds_minimal, args=(conditions,),
                                     maxiter=200, seed=42, disp=False, polish=True)
     models["Minimal (shared B, T×TP)"] = {"k": 6, "mse": result.fun, "params": result.x}
+
+    # Model 5: Interaction model (8 params) - reduced from full
+    bounds_interaction = [
+        (0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.0, 0.3),
+        (0.1, 30.0), (0.1, 30.0), (-10.0, 10.0),  # gamma can be negative
+    ]
+    result = differential_evolution(loss_fn_interaction, bounds_interaction, args=(conditions,),
+                                    maxiter=200, seed=42, disp=False, polish=True)
+    models["Interaction (B×FR, T+γ)"] = {"k": 8, "mse": result.fun, "params": result.x}
 
     # Compute AIC and BIC for each model
     for name, m in models.items():
@@ -522,20 +574,12 @@ def main():
     print(f"  1:4, 10s: T = {params['T_14_10']:.2f}")
     print()
 
-    print("=" * 70)
-    print("KEY TEST: Frequency × Time Pressure Interaction")
-    print("=" * 70)
-    print()
     print("Time pressure effect (ΔT = T_10s - T_5s):")
     delta_T_12 = params['T_12_10'] - params['T_12_5']
     delta_T_14 = params['T_14_10'] - params['T_14_5']
-    print(f"  1:2 (small B_HF): ΔT = {delta_T_12:.2f}")
-    print(f"  1:4 (large B_HF): ΔT = {delta_T_14:.2f}")
-    print()
-    print("VOC prediction: ΔT should be larger for 1:2 than 1:4")
-    print(f"  Result: ΔT(1:2) / ΔT(1:4) = {delta_T_12 / delta_T_14:.2f}x")
-    if delta_T_12 > delta_T_14:
-        print("  ✓ Confirmed: Larger time pressure effect when HF advantage is smaller")
+    print(f"  1:2: ΔT = {delta_T_12:.2f}")
+    print(f"  1:4: ΔT = {delta_T_14:.2f}")
+    print(f"  Ratio: {delta_T_12 / delta_T_14:.2f}x")
     print()
 
     print("=" * 70)

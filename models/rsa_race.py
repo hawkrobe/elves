@@ -7,15 +7,10 @@ Model:
 Where:
     - B(w): baseline activation (higher for HF due to frequency)
     - M(θ, w): semantic match between target θ and word meaning
-    - δ: drift rate (how fast semantic information accumulates)
+    - δ: drift rate (semantic accumulation speed)
     - t: time available for processing
 
 Selection via softmax over activations at response time.
-
-Key insight: At t=0, only baseline matters (frequency effect).
-As t increases, semantic match dominates (informativity effect).
-The "cost" of LF is the TIME needed for semantic information to overcome
-the frequency disadvantage.
 """
 
 import jax

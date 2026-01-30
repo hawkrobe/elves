@@ -849,7 +849,11 @@ ggplot(recall_acc_by_freq_exp1, aes(x = targetFreq, y = accuracy, fill = targetF
 ```
 
 ```{r accuracy-summary-exp1}
+# Compute overall accuracy
+exact_acc_overall_exp1 <- mean(exact_angle_exp1$is_correct, na.rm = TRUE)
+recall_acc_overall_exp1 <- mean(final_recall_exp1$is_correct, na.rm = TRUE)
+
 cat("\n=== ACCURACY SUMMARY (Exp 1) ===\n")
-cat(sprintf("Exact Angle (Timed): %.1f%%\n", 100 * exact_acc_overall_exp1$accuracy))
-cat(sprintf("Final Recall (Untimed): %.1f%%\n", 100 * recall_acc_overall_exp1$accuracy))
+cat(sprintf("Exact Angle (Timed): %.1f%%\n", 100 * exact_acc_overall_exp1))
+cat(sprintf("Final Recall (Untimed): %.1f%%\n", 100 * recall_acc_overall_exp1))
 ```
