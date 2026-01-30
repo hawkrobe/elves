@@ -397,23 +397,25 @@ race_model_pred <- function(dist_to_lf, freq_ratio, time_pressure) {
   # Convert distance to theta (model space: 0.5 = LF prototype)
   theta <- 0.5 - dist_to_lf / 90
 
-  # Shared parameters (fitted with delta constrained ≤10 so T ≈ RT)
-  sigma <- 0.206
-  delta <- 0.467
-  lapse <- 0.150
+  # Interaction model parameters (8 params, trial-level NLL fit)
+  sigma <- 0.194
+  delta <- 0.620
+  lapse <- 0.157
 
   # B_HF varies by frequency ratio
-  B_hf <- ifelse(freq_ratio == "1:2", 0.464, 0.800)
+  B_hf <- ifelse(freq_ratio == "1:2", 0.497, 0.912)
 
-  # T varies by condition (captures freq × time pressure interaction)
-  # 1:2: ΔT = 2.64 (large time pressure effect)
-  # 1:4: ΔT = 0.86 (small time pressure effect)
-  # T values now interpretable as ~response times in seconds
+  # Interaction model: T_5, T_10, gamma
+  # T(5s, 1:2) = T_5, T(5s, 1:4) = T_5 + γ, T(10s, *) = T_10
+  T_5 <- 3.47
+  T_10 <- 5.66
+  gamma <- 1.53
+
   T <- case_when(
-    freq_ratio == "1:2" & time_pressure == 5 ~ 4.75,
-    freq_ratio == "1:2" & time_pressure == 10 ~ 7.39,
-    freq_ratio == "1:4" & time_pressure == 5 ~ 6.33,
-    freq_ratio == "1:4" & time_pressure == 10 ~ 7.19
+    freq_ratio == "1:2" & time_pressure == 5 ~ T_5,
+    freq_ratio == "1:2" & time_pressure == 10 ~ T_10,
+    freq_ratio == "1:4" & time_pressure == 5 ~ T_5 + gamma,
+    freq_ratio == "1:4" & time_pressure == 10 ~ T_10
   )
 
   # Word locations (HF1=0, LF=0.5, HF2=1)
@@ -520,7 +522,7 @@ rt_by_condition <- d_critical_exp1 |>
 fitted_T <- tibble(
   time_pressure = c(5, 5, 10, 10),
   frequency_ratio = c("1:2", "1:4", "1:2", "1:4"),
-  T_fitted = c(4.75, 6.33, 7.39, 7.19)
+  T_fitted = c(3.47, 5.00, 5.66, 5.66)  # Interaction model: T_5=3.47, T_10=5.66, γ=1.53
 )
 
 # Compare empirical RT to fitted T
