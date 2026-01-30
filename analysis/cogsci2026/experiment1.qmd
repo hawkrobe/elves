@@ -375,7 +375,7 @@ ggplot(d_binned_chose_nearest_fr, aes(x = dist_mean, y = empirical_stat,
   )
 ```
 
-# Figure 2: Empirical Results
+# Figure 2: Empirical Results with Race Model Fit
 
 ```{r fig-setup}
 # Bin data for plotting
@@ -389,100 +389,114 @@ theme_fig <- theme_minimal(base_size = 12) +
     panel.grid.minor = element_blank(),
     plot.title = element_text(face = "bold")
   )
+
+# Race model prediction function (using fitted parameters from models/fit.py)
+# Fitted params with separate T for each condition to capture freq × time interaction
+# Key finding: ΔT (time pressure effect) is larger for 1:2 than 1:4 (VOC prediction)
+race_model_pred <- function(dist_to_lf, freq_ratio, time_pressure) {
+  # Convert distance to theta (model space: 0.5 = LF prototype)
+  theta <- 0.5 - dist_to_lf / 90
+
+  # Shared parameters (fitted with delta constrained ≤10 so T ≈ RT)
+  sigma <- 0.206
+  delta <- 0.467
+  lapse <- 0.150
+
+  # B_HF varies by frequency ratio
+  B_hf <- ifelse(freq_ratio == "1:2", 0.464, 0.800)
+
+  # T varies by condition (captures freq × time pressure interaction)
+  # 1:2: ΔT = 2.64 (large time pressure effect)
+  # 1:4: ΔT = 0.86 (small time pressure effect)
+  # T values now interpretable as ~response times in seconds
+  T <- case_when(
+    freq_ratio == "1:2" & time_pressure == 5 ~ 4.75,
+    freq_ratio == "1:2" & time_pressure == 10 ~ 7.39,
+    freq_ratio == "1:4" & time_pressure == 5 ~ 6.33,
+    freq_ratio == "1:4" & time_pressure == 10 ~ 7.19
+  )
+
+  # Word locations (HF1=0, LF=0.5, HF2=1)
+  word_locs <- c(0, 0.5, 1)
+
+  # Semantic match (Gaussian)
+  M <- dnorm(theta, mean = word_locs, sd = sigma)
+
+  # Baseline activations (B_lf = 0 fixed)
+  B <- c(B_hf, 0, B_hf)
+
+  # Activation at time T
+  A <- B + delta * M * T
+
+  # Softmax + lapse
+  probs <- exp(A) / sum(exp(A))
+  p_lf <- (1 - lapse) * probs[2] + lapse * (1/3)
+
+  return(p_lf)
+}
 ```
 
-```{r fig-panel-a, fig.width=5, fig.height=4}
-# Panel A: Time Pressure effect
-d_binned_tp_exp1 <- d_critical_exp1 |>
+```{r fig-2x2, fig.width=10, fig.height=4.5}
+# 2x2 Figure: Split by frequency ratio, time pressure as curves within each panel
+
+# Bin data by all 4 conditions
+d_binned_2x2 <- d_critical_exp1 |>
   mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
-  group_by(time_pressure, dist_bin) |>
+  group_by(frequency_ratio, time_pressure, dist_bin) |>
   tidyboot_mean(responded_lf) |>
   left_join(
     d_critical_exp1 |>
       mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
-      group_by(time_pressure, dist_bin) |>
+      group_by(frequency_ratio, time_pressure, dist_bin) |>
       summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
-    by = c("time_pressure", "dist_bin")
+    by = c("frequency_ratio", "time_pressure", "dist_bin")
   )
 
-# Get scaling parameters for predictions
-dist_mean_exp1 <- mean(d_critical_exp1$dist_to_lf)
-dist_sd_exp1 <- sd(d_critical_exp1$dist_to_lf)
-
-# Model predictions
-pred_tp_exp1 <- expand.grid(
-  dist_to_lf = seq(0, 45, length.out = 100),
-  time_pressure_c = c(-0.5, 0.5),
-  freq_ratio_c = 0
+# Race model predictions for smooth curves
+pred_race <- expand.grid(
+  dist_to_lf = seq(0.5, 44.5, length.out = 100),
+  frequency_ratio = c("1:2", "1:4"),
+  time_pressure = c(5, 10)
 ) |>
-  mutate(
-    dist_to_lf_scaled = (dist_to_lf - dist_mean_exp1) / dist_sd_exp1,
-    time_pressure = ifelse(time_pressure_c < 0, 5, 10),
-    p_lf = predict(m_tp_exp1, newdata = pick(everything()), type = "response", re.form = NA)
-  )
+  rowwise() |>
+  mutate(p_lf = race_model_pred(dist_to_lf, frequency_ratio, time_pressure)) |>
+  ungroup()
 
-p_tp_exp1 <- ggplot(d_binned_tp_exp1, aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
+# Panel A: Frequency Ratio 1:2
+p_12 <- ggplot(d_binned_2x2 |> filter(frequency_ratio == "1:2"),
+               aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
   geom_point(size = 3) +
   geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
-  geom_line(data = pred_tp_exp1, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_line(data = pred_race |> filter(frequency_ratio == "1:2"),
+            aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
   scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
   scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
-  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Time Pressure", title = "A") +
+  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Time Pressure",
+       title = "Frequency Ratio 1:2") +
   theme_fig
 
-p_tp_exp1
-```
-
-```{r fig-panel-b, fig.width=5, fig.height=4}
-# Panel B: Frequency Ratio effect
-d_binned_freq_exp1 <- d_critical_exp1 |>
-  mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
-  group_by(frequency_ratio, dist_bin) |>
-  tidyboot_mean(responded_lf) |>
-  left_join(
-    d_critical_exp1 |>
-      mutate(dist_bin = cut(dist_to_lf, breaks = n_bins, include.lowest = TRUE)) |>
-      group_by(frequency_ratio, dist_bin) |>
-      summarise(dist_mean = mean(dist_to_lf), .groups = "drop"),
-    by = c("frequency_ratio", "dist_bin")
-  )
-
-# Model predictions
-pred_freq_exp1 <- expand.grid(
-  dist_to_lf = seq(0, 45, length.out = 100),
-  freq_ratio_c = c(-0.5, 0.5),
-  time_pressure_c = 0
-) |>
-  mutate(
-    dist_to_lf_scaled = (dist_to_lf - dist_mean_exp1) / dist_sd_exp1,
-    frequency_ratio = ifelse(freq_ratio_c < 0, "1:2", "1:4"),
-    p_lf = predict(m_freq_exp1, newdata = pick(everything()), type = "response", re.form = NA)
-  )
-
-p_freq_exp1 <- ggplot(d_binned_freq_exp1, aes(x = dist_mean, y = empirical_stat, color = frequency_ratio)) +
+# Panel B: Frequency Ratio 1:4
+p_14 <- ggplot(d_binned_2x2 |> filter(frequency_ratio == "1:4"),
+               aes(x = dist_mean, y = empirical_stat, color = factor(time_pressure))) +
   geom_point(size = 3) +
   geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 1) +
-  geom_line(data = pred_freq_exp1, aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
+  geom_line(data = pred_race |> filter(frequency_ratio == "1:4"),
+            aes(x = dist_to_lf, y = p_lf), linewidth = 1.2) +
   geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
-  scale_color_manual(values = colors_freq) +
+  scale_color_manual(values = colors_tp, labels = c("Strict (5s)", "Lenient (10s)")) +
   scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
-  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Frequency Ratio", title = "B") +
+  labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Time Pressure",
+       title = "Frequency Ratio 1:4") +
   theme_fig
 
-p_freq_exp1
-```
-
-```{r fig-combined, fig.width=10, fig.height=4}
-#| fig-cap: "P(LF) by distance from LF prototype"
-
-p_combined_exp1 <- p_tp_exp1 + p_freq_exp1
+p_combined_exp1 <- p_12 + p_14
 p_combined_exp1
 
 ggsave(file.path(fig_path, "empirical_results.pdf"), p_combined_exp1,
-       width = 10, height = 4, dpi = 300)
+       width = 10, height = 4.5, dpi = 300)
 ```
 
 **Time pressure x distance**: $\beta$ = `r round(tp_coef_exp1["Estimate"], 3)`, *z* = `r round(tp_coef_exp1["z value"], 2)`, *p* `r ifelse(tp_coef_exp1["Pr(>|z|)"] < .001, "< .001", sprintf("= %.3f", tp_coef_exp1["Pr(>|z|)"]))`
@@ -491,16 +505,74 @@ ggsave(file.path(fig_path, "empirical_results.pdf"), p_combined_exp1,
 
 # Response Time Analysis
 
-```{r rt-summary}
+```{r rt-by-condition}
+# Mean RT by condition (2x2)
+rt_by_condition <- d_critical_exp1 |>
+  group_by(time_pressure, frequency_ratio) |>
+  summarise(
+    M_rt = mean(rt) / 1000,
+    SD_rt = sd(rt) / 1000,
+    n = n(),
+    .groups = "drop"
+  )
+
+# Fitted T values from race model (see models/fit.py)
+fitted_T <- tibble(
+  time_pressure = c(5, 5, 10, 10),
+  frequency_ratio = c("1:2", "1:4", "1:2", "1:4"),
+  T_fitted = c(4.75, 6.33, 7.39, 7.19)
+)
+
+# Compare empirical RT to fitted T
+rt_comparison <- rt_by_condition |>
+  left_join(fitted_T, by = c("time_pressure", "frequency_ratio")) |>
+  mutate(
+    ratio = T_fitted / M_rt
+  )
+
+knitr::kable(
+  rt_comparison,
+  digits = 2,
+  col.names = c("Time Pressure (s)", "Freq Ratio", "Mean RT (s)", "SD RT (s)", "N", "Fitted T", "T/RT Ratio"),
+  caption = "Comparison of empirical mean RTs and fitted T parameters from race model"
+)
+```
+
+```{r rt-interaction-test}
+# Test for frequency × time pressure interaction in RTs
+rt_summary_wide <- rt_by_condition |>
+  select(time_pressure, frequency_ratio, M_rt) |>
+  pivot_wider(names_from = c(frequency_ratio, time_pressure), values_from = M_rt)
+
+# Compute interaction
+delta_rt_12 <- rt_summary_wide$`1:2_10` - rt_summary_wide$`1:2_5`
+delta_rt_14 <- rt_summary_wide$`1:4_10` - rt_summary_wide$`1:4_5`
+
+cat("Time pressure effect on RT (ΔRT = RT_10s - RT_5s):\n")
+cat(sprintf("  1:2: ΔRT = %.2f s\n", delta_rt_12))
+cat(sprintf("  1:4: ΔRT = %.2f s\n", delta_rt_14))
+cat(sprintf("  Ratio: %.2fx\n", delta_rt_12 / delta_rt_14))
+```
+
+```{r rt-by-response}
+# RT by response type (HF vs LF) and condition
 d_critical_exp1 |>
-  group_by(time_pressure, responseFreq) |>
-  summarise(M = mean(rt), SD = sd(rt), n = n(), .groups = "drop") |>
-  knitr::kable(digits = 0, col.names = c("Time Pressure", "Response", "M RT", "SD", "N"))
+  group_by(time_pressure, frequency_ratio, responseFreq) |>
+  summarise(
+    M = mean(rt) / 1000,
+    SD = sd(rt) / 1000,
+    n = n(),
+    .groups = "drop"
+  ) |>
+  knitr::kable(
+    digits = 2,
+    col.names = c("Time Pressure", "Freq Ratio", "Response", "M RT (s)", "SD (s)", "N")
+  )
 ```
 
 ```{r rt-model}
 m_rt_exp1 <- lmer(
-  log(rt) ~ responded_lf * dist_to_lf_scaled * time_pressure_c + 
+  log(rt) ~ responded_lf * dist_to_lf_scaled * time_pressure_c + freq_ratio_c +
     (1 + dist_to_lf_scaled | subject_id) + (1 | lf_word),
   data = d_critical_exp1,
   control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))

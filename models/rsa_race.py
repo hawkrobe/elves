@@ -26,8 +26,6 @@ import numpy as np
 
 N_ANGLES = 101
 
-Angle = jnp.linspace(0, 1, N_ANGLES)
-
 
 class Word(IntEnum):
     HF1 = 0
@@ -135,8 +133,8 @@ def retrieval_choice_model(theta, sigma, alpha, lambda_lf, T):
 # Vectorized Prediction Functions
 # =============================================================================
 
-def predict_race(sigma=0.75, B_hf=0.68, delta=9.98, lapse=0.17,
-                 T_strict=5.0, T_lenient=10.0):
+def predict_race(sigma=0.206, B_hf=0.464, delta=0.467, lapse=0.150,
+                 T_strict=4.75, T_lenient=7.39):
     """Generate race model predictions for strict vs lenient deadline."""
     angles = jnp.linspace(0, 1, N_ANGLES)
 
@@ -192,7 +190,7 @@ def predict_fixed_resource(sigma=0.15, alpha=4.0, p_retrieve_fixed=0.7):
     }
 
 
-def model_comparison(sigma=0.75, B_hf=0.68, delta=9.98, lapse=0.17,
+def model_comparison(sigma=0.206, B_hf=0.464, delta=0.467, lapse=0.150,
                      lambda_lf=0.3, T=10.0, p_fixed=0.7, alpha=4.0):
     """Compare race model, retrieval model, and fixed model."""
     angles = jnp.linspace(0, 1, N_ANGLES)
@@ -279,7 +277,7 @@ def optimal_stopping_time_race(theta, sigma, B_hf, delta, cost, lapse=0.0,
     return T_max
 
 
-def predict_voc_race(sigma=0.75, B_hf=0.68, delta=9.98, lapse=0.17,
+def predict_voc_race(sigma=0.206, B_hf=0.464, delta=0.467, lapse=0.150,
                      cost=0.1, T_max=15.0):
     """
     Generate VOC predictions for race model.
@@ -306,7 +304,7 @@ def predict_voc_race(sigma=0.75, B_hf=0.68, delta=9.98, lapse=0.17,
     }
 
 
-def predict_voc_race_comparison(sigma=0.75, B_hf=0.68, delta=9.98, lapse=0.17,
+def predict_voc_race_comparison(sigma=0.206, B_hf=0.464, delta=0.467, lapse=0.150,
                                  cost_strict=0.2, cost_lenient=0.05, T_max=15.0):
     """
     Compare VOC predictions under different costs (time pressure manipulation).
@@ -359,8 +357,8 @@ def predict_voc_race_comparison(sigma=0.75, B_hf=0.68, delta=9.98, lapse=0.17,
 # Fixed (baked into race_model): α=1, B_lf=0
 
 DEFAULT_PARAMS = {
-    'sigma': 0.75,
-    'B_hf': 0.68,
-    'delta': 9.98,
-    'lapse': 0.17,
+    'sigma': 0.206,
+    'B_hf': 0.464,      # 1:2 condition; use 0.800 for 1:4
+    'delta': 0.467,
+    'lapse': 0.150,
 }
