@@ -163,6 +163,57 @@ def loss_fn(params, conditions):
     return total_loss / total_n
 
 
+def nll_trial_level(params, df):
+    """
+    Compute negative log-likelihood on TRIAL-LEVEL binary outcomes.
+    
+    Parameters: same as loss_fn
+    """
+    sigma, B_hf_12, B_hf_14, delta, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
+
+    # Parameter bounds
+    if sigma <= 0.05 or sigma > 2.0:
+        return 1e10
+    if delta <= 0 or delta > 50:
+        return 1e10
+    if lapse < 0 or lapse > 0.5:
+        return 1e10
+    if any(t <= 0 for t in [T_12_5, T_12_10, T_14_5, T_14_10]):
+        return 1e10
+
+    # Parameter mappings
+    T_map = {
+        (5, "1:2"): T_12_5,
+        (10, "1:2"): T_12_10,
+        (5, "1:4"): T_14_5,
+        (10, "1:4"): T_14_10,
+    }
+    B_map = {"1:2": B_hf_12, "1:4": B_hf_14}
+
+    EPS = 1e-10  # for log(0)
+    total_nll = 0.0
+
+    for _, row in df.iterrows():
+        tp = row["time_pressure"]
+        fr = row["frequency_ratio"]
+        theta = row["theta"]
+        y = row["is_lf"]  # Binary: 1 if chose LF, 0 otherwise
+
+        T = T_map[(tp, fr)]
+        B_hf = B_map[fr]
+
+        try:
+            p_lf = predict_p_lf(theta, sigma, B_hf, delta, T, lapse)
+            p_lf = np.clip(p_lf, EPS, 1 - EPS)  # no log(0)
+        except (ValueError, RuntimeError):
+            return 1e10
+
+        # Binary cross-entropy for this trial
+        total_nll -= y * np.log(p_lf) + (1 - y) * np.log(1 - p_lf)
+
+    return total_nll
+
+
 # =============================================================================
 # Fitting
 # =============================================================================
@@ -209,6 +260,52 @@ def fit_model(conditions, verbose=True):
                    "T_12_5", "T_12_10", "T_14_5", "T_14_10"]
     params = {name: val for name, val in zip(param_names, result.x)}
     params["loss"] = result.fun
+
+    return params
+
+
+def fit_model_trial_level(df, verbose=True):
+    """
+    Fit race model using trial-level log-likelihood.
+    """
+    bounds = [
+        (0.1, 2.0),    # sigma
+        (-2.0, 2.0),   # B_hf_12
+        (-2.0, 2.0),   # B_hf_14
+        (0.1, 10.0),   # delta
+        (0.0, 0.3),    # lapse
+        (0.1, 30.0),   # T_12_5
+        (0.1, 30.0),   # T_12_10
+        (0.1, 30.0),   # T_14_5
+        (0.1, 30.0),   # T_14_10
+    ]
+
+    if verbose:
+        print("Fitting race model using trial-level log-likelihood...")
+        print("  Loss: Negative log-likelihood (binary cross-entropy)")
+        print("  Shared params: σ, δ, λ")
+        print("  By frequency ratio: B_HF(1:2), B_HF(1:4)")
+        print("  By condition: T_12_5, T_12_10, T_14_5, T_14_10")
+        print(f"  N trials: {len(df):,}")
+        print()
+
+    result = differential_evolution(
+        nll_trial_level,
+        bounds,
+        args=(df,),
+        maxiter=300,
+        seed=42,
+        disp=verbose,
+        polish=True,
+        workers=1,
+        tol=1e-7,
+    )
+
+    param_names = ["sigma", "B_hf_12", "B_hf_14", "delta", "lapse",
+                   "T_12_5", "T_12_10", "T_14_5", "T_14_10"]
+    params = {name: val for name, val in zip(param_names, result.x)}
+    params["nll"] = result.fun
+    params["ll"] = -result.fun
 
     return params
 
@@ -546,11 +643,11 @@ def main():
 
     # Fit model
     print("-" * 70)
-    params = fit_model(conditions, verbose=True)
+    params = fit_model_trial_level(df, verbose=True)
     print()
 
     # Compute fit statistics
-    fit_stats = compute_fit_stats(params, conditions)
+    #fit_stats = compute_fit_stats(params, conditions)
 
     # Print results
     print("=" * 70)
@@ -586,11 +683,11 @@ def main():
     print("FIT STATISTICS")
     print("=" * 70)
     print()
-    for (tp, fr) in [(5, "1:2"), (5, "1:4"), (10, "1:2"), (10, "1:4")]:
-        r2 = fit_stats[(tp, fr)]["r2"]
-        print(f"  T={tp}s, FR={fr}: R² = {r2:.4f}")
+    #for (tp, fr) in [(5, "1:2"), (5, "1:4"), (10, "1:2"), (10, "1:4")]:
+    #    r2 = fit_stats[(tp, fr)]["r2"]
+    #    print(f"  T={tp}s, FR={fr}: R² = {r2:.4f}")
     print()
-    print(f"  Overall: R² = {fit_stats['overall']['r2']:.4f}")
+    #print(f"  Overall: R² = {fit_stats['overall']['r2']:.4f}")
     print()
 
     # Plot
