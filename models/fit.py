@@ -21,9 +21,8 @@ Output:
 
 import pandas as pd
 import numpy as np
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import minimize
 from scipy.stats import chi2
-import matplotlib.pyplot as plt
 from pathlib import Path
 
 import jax
@@ -76,42 +75,8 @@ def load_data():
     return df
 
 
-def get_binned_data(df, n_bins=9):
-    """Bin data by condition for model fitting."""
-    conditions = {}
-
-    for tp in [5, 10]:
-        for fr in ["1:2", "1:4"]:
-            subset = df[(df["time_pressure"] == tp) & (df["frequency_ratio"] == fr)]
-
-            binned = subset.groupby(
-                pd.cut(subset["dist_to_lf_deg"], bins=n_bins),
-                observed=True
-            ).agg({
-                "is_lf": ["mean", "count", "sem"],
-                "theta": "mean",
-                "dist_to_lf_deg": "mean",
-            })
-            binned.columns = ["p_lf", "n", "se", "theta_mean", "dist_mean"]
-            binned = binned.reset_index(drop=True)
-
-            conditions[(tp, fr)] = binned
-
-    return conditions
-
-
 # =============================================================================
-# Model Prediction
-# =============================================================================
-
-def predict_p_lf(theta, sigma, B_hf, delta, T, lapse):
-    """Predict P(LF) at a given position."""
-    probs = race_model(theta, sigma, B_hf, delta, T, lapse)
-    return float(probs[1])  # Index 1 = LF
-
-
-# =============================================================================
-# Loss Function (Trial-level Negative Log-Likelihood)
+# Loss Functions
 # =============================================================================
 
 def neg_log_likelihood(params, df):
@@ -163,140 +128,25 @@ def neg_log_likelihood(params, df):
     return -np.sum(y * np.log(p_lf) + (1 - y) * np.log(1 - p_lf))
 
 
-# Legacy MSE loss for binned data (kept for comparison)
-def loss_fn(params, conditions):
-    """Compute weighted MSE loss on binned data (legacy)."""
-    sigma, B_hf_12, B_hf_14, delta, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
-
-    if sigma <= 0.05 or sigma > 2.0:
-        return 1e10
-    if delta <= 0 or delta > 50:
-        return 1e10
-    if lapse < 0 or lapse > 0.5:
-        return 1e10
-    if any(t <= 0 for t in [T_12_5, T_12_10, T_14_5, T_14_10]):
-        return 1e10
-
-    T_map = {
-        (5, "1:2"): T_12_5, (10, "1:2"): T_12_10,
-        (5, "1:4"): T_14_5, (10, "1:4"): T_14_10,
-    }
-    B_map = {"1:2": B_hf_12, "1:4": B_hf_14}
-
-    total_loss, total_n = 0, 0
-    for (tp, fr), data in conditions.items():
-        T, B_hf = T_map[(tp, fr)], B_map[fr]
-        for _, row in data.iterrows():
-            try:
-                pred = predict_p_lf(row["theta_mean"], sigma, B_hf, delta, T, lapse)
-            except (ValueError, RuntimeError):
-                return 1e10
-            total_loss += row["n"] * (pred - row["p_lf"]) ** 2
-            total_n += row["n"]
-    return total_loss / total_n
-
-
-def nll_trial_level(params, df):
-    """
-    Compute negative log-likelihood on TRIAL-LEVEL binary outcomes.
-    
-    Parameters: same as loss_fn
-    """
-    sigma, B_hf_12, B_hf_14, delta, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
-
-    # Parameter bounds
-    if sigma <= 0.05 or sigma > 2.0:
-        return 1e10
-    if delta <= 0 or delta > 50:
-        return 1e10
-    if lapse < 0 or lapse > 0.5:
-        return 1e10
-    if any(t <= 0 for t in [T_12_5, T_12_10, T_14_5, T_14_10]):
-        return 1e10
-
-    # Parameter mappings
-    T_map = {
-        (5, "1:2"): T_12_5,
-        (10, "1:2"): T_12_10,
-        (5, "1:4"): T_14_5,
-        (10, "1:4"): T_14_10,
-    }
-    B_map = {"1:2": B_hf_12, "1:4": B_hf_14}
-
-    EPS = 1e-10  # for log(0)
-    total_nll = 0.0
-
-    for _, row in df.iterrows():
-        tp = row["time_pressure"]
-        fr = row["frequency_ratio"]
-        theta = row["theta"]
-        y = row["is_lf"]  # Binary: 1 if chose LF, 0 otherwise
-
-        T = T_map[(tp, fr)]
-        B_hf = B_map[fr]
-
-        try:
-            p_lf = predict_p_lf(theta, sigma, B_hf, delta, T, lapse)
-            p_lf = np.clip(p_lf, EPS, 1 - EPS)  # no log(0)
-        except (ValueError, RuntimeError):
-            return 1e10
-
-        # Binary cross-entropy for this trial
-        total_nll -= y * np.log(p_lf) + (1 - y) * np.log(1 - p_lf)
-
-    return total_nll
-
-
 # =============================================================================
 # Fitting
 # =============================================================================
 
-def fit_model(df, verbose=True):
-    """
-    Fit Interaction model using trial-level negative log-likelihood.
-
-    Interaction model (8 params):
-      T(5s, 1:2) = T_5
-      T(5s, 1:4) = T_5 + γ
-      T(10s, 1:2) = T_10
-      T(10s, 1:4) = T_10
-
-    Returns dict of fitted parameters.
-    """
-    # Parameter bounds: sigma, B_hf_12, B_hf_14, delta, lapse, T_5, T_10, gamma
+def fit_model(df):
+    """Fit Interaction model using trial-level negative log-likelihood."""
+    x0 = [0.2, 0.5, 0.9, 0.5, 0.15, 4.0, 6.0, 1.5]  # sigma, B_12, B_14, delta, lapse, T_5, T_10, gamma
     bounds = [
-        (0.1, 2.0),    # sigma
-        (-2.0, 2.0),   # B_hf_12
-        (-2.0, 2.0),   # B_hf_14
-        (0.1, 10.0),   # delta
-        (0.0, 0.3),    # lapse
-        (0.1, 30.0),   # T_5
-        (0.1, 30.0),   # T_10
-        (-10.0, 10.0), # gamma
+        (0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0),
+        (0.0, 0.3), (0.1, 30.0), (0.1, 30.0), (-10.0, 10.0),
     ]
 
-    if verbose:
-        print("Fitting Interaction model (trial-level NLL)...")
-        print(f"  N trials: {len(df):,}")
-        print()
-
-    result = differential_evolution(
-        nll_interaction,
-        bounds,
-        args=(df,),
-        maxiter=300,
-        seed=42,
-        disp=verbose,
-        polish=True,
-        workers=1,
-        tol=1e-7,
-    )
+    print(f"Fitting Interaction model ({len(df):,} trials)...")
+    result = minimize(nll_interaction, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
 
     param_names = ["sigma", "B_hf_12", "B_hf_14", "delta", "lapse",
                    "T_5", "T_10", "gamma"]
     params = {name: val for name, val in zip(param_names, result.x)}
 
-    # Compute derived T values for each condition
     params["T_12_5"] = params["T_5"]
     params["T_12_10"] = params["T_10"]
     params["T_14_5"] = params["T_5"] + params["gamma"]
@@ -308,157 +158,8 @@ def fit_model(df, verbose=True):
     return params
 
 
-def fit_model_trial_level(df, verbose=True):
-    """
-    Fit race model using trial-level log-likelihood.
-    """
-    bounds = [
-        (0.1, 2.0),    # sigma
-        (-2.0, 2.0),   # B_hf_12
-        (-2.0, 2.0),   # B_hf_14
-        (0.1, 10.0),   # delta
-        (0.0, 0.3),    # lapse
-        (0.1, 30.0),   # T_12_5
-        (0.1, 30.0),   # T_12_10
-        (0.1, 30.0),   # T_14_5
-        (0.1, 30.0),   # T_14_10
-    ]
-
-    if verbose:
-        print("Fitting race model using trial-level log-likelihood...")
-        print("  Loss: Negative log-likelihood (binary cross-entropy)")
-        print("  Shared params: σ, δ, λ")
-        print("  By frequency ratio: B_HF(1:2), B_HF(1:4)")
-        print("  By condition: T_12_5, T_12_10, T_14_5, T_14_10")
-        print(f"  N trials: {len(df):,}")
-        print()
-
-    result = differential_evolution(
-        nll_trial_level,
-        bounds,
-        args=(df,),
-        maxiter=300,
-        seed=42,
-        disp=verbose,
-        polish=True,
-        workers=1,
-        tol=1e-7,
-    )
-
-    param_names = ["sigma", "B_hf_12", "B_hf_14", "delta", "lapse",
-                   "T_12_5", "T_12_10", "T_14_5", "T_14_10"]
-    params = {name: val for name, val in zip(param_names, result.x)}
-    params["nll"] = result.fun
-    params["ll"] = -result.fun
-
-    return params
-
-
 # =============================================================================
-# Fit Statistics
-# =============================================================================
-
-def compute_fit_stats(params, conditions):
-    """Compute R² for each condition and overall."""
-    T_map = {
-        (5, "1:2"): params["T_12_5"],
-        (10, "1:2"): params["T_12_10"],
-        (5, "1:4"): params["T_14_5"],
-        (10, "1:4"): params["T_14_10"],
-    }
-    B_map = {"1:2": params["B_hf_12"], "1:4": params["B_hf_14"]}
-
-    results = {}
-    all_true, all_pred = [], []
-
-    for (tp, fr), data in conditions.items():
-        T = T_map[(tp, fr)]
-        B_hf = B_map[fr]
-
-        y_true = data["p_lf"].values
-        y_pred = np.array([
-            predict_p_lf(th, params["sigma"], B_hf, params["delta"], T, params["lapse"])
-            for th in data["theta_mean"].values
-        ])
-
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - y_true.mean()) ** 2)
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-
-        results[(tp, fr)] = {"r2": r2, "y_true": y_true, "y_pred": y_pred}
-        all_true.extend(y_true)
-        all_pred.extend(y_pred)
-
-    # Overall R²
-    all_true, all_pred = np.array(all_true), np.array(all_pred)
-    ss_res = np.sum((all_true - all_pred) ** 2)
-    ss_tot = np.sum((all_true - all_true.mean()) ** 2)
-    results["overall"] = {"r2": 1 - ss_res / ss_tot}
-
-    return results
-
-
-# =============================================================================
-# Visualization
-# =============================================================================
-
-def plot_fit(params, conditions, save_path="race_model_fit.png"):
-    """Create 2-panel visualization of model fit."""
-    T_map = {
-        (5, "1:2"): params["T_12_5"],
-        (10, "1:2"): params["T_12_10"],
-        (5, "1:4"): params["T_14_5"],
-        (10, "1:4"): params["T_14_10"],
-    }
-    B_map = {"1:2": params["B_hf_12"], "1:4": params["B_hf_14"]}
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
-
-    colors = {5: "#E94F37", 10: "#2E86AB"}
-    labels = {5: "Strict (5s)", 10: "Lenient (10s)"}
-
-    for idx, fr in enumerate(["1:2", "1:4"]):
-        ax = axes[idx]
-        B_hf = B_map[fr]
-
-        for tp in [5, 10]:
-            data = conditions[(tp, fr)]
-            T = T_map[(tp, fr)]
-
-            # Plot data points
-            ax.errorbar(
-                data["dist_mean"], data["p_lf"], yerr=data["se"],
-                fmt="o", color=colors[tp], markersize=7, capsize=2,
-                label=f"{labels[tp]} (data)", linewidth=0, alpha=0.8
-            )
-
-            # Plot model predictions
-            dist_smooth = np.linspace(0.5, 44.5, 100)
-            theta_smooth = 0.5 - dist_smooth / 90
-            pred = [
-                predict_p_lf(th, params["sigma"], B_hf, params["delta"], T, params["lapse"])
-                for th in theta_smooth
-            ]
-            ax.plot(dist_smooth, pred, color=colors[tp], linewidth=2.5,
-                    label=f"{labels[tp]} (model)")
-
-        ax.axvline(22.5, color="gray", ls="--", alpha=0.5)
-        ax.set_xlabel("Distance from LF (deg)", fontsize=11)
-        ax.set_ylabel("P(LF)", fontsize=11)
-        ax.set_title(f"Frequency Ratio {fr}", fontsize=12)
-        ax.set_xlim(0, 45)
-        ax.set_ylim(0, 1)
-        ax.legend(loc="upper right", fontsize=9)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    print(f"Saved {save_path}")
-
-    return fig
-
-
-# =============================================================================
-# Model Comparison (Trial-level NLL, Vectorized)
+# Model Comparison
 # =============================================================================
 
 def _compute_nll_vec(theta, T, B_hf, y, sigma, delta, lapse):
@@ -549,12 +250,11 @@ def nll_interaction(params, df):
     return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, delta, lapse)
 
 
-def fit_model_comparison(df, full_params=None, verbose=False):
-    """Fit all model variants and compare using AIC/BIC. Uses L-BFGS-B for speed."""
+def fit_model_comparison(df, full_params=None):
+    """Fit all model variants and compare using AIC/BIC."""
     n_obs = len(df)
     models = {}
 
-    # Starting values derived from full model fit
     if full_params is None:
         x0_base = [0.2, 0.5, 0.9, 0.4, 0.15, 6.0, 9.0, 7.0, 8.0]
     else:
@@ -565,63 +265,44 @@ def fit_model_comparison(df, full_params=None, verbose=False):
             full_params["T_14_5"], full_params["T_14_10"]
         ]
 
-    # Model 1: Full (9 params)
-    if verbose:
-        print("  Full (9 params)...", end=" ", flush=True)
-    bounds_full = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-                   (0.1, 30.0), (0.1, 30.0), (0.1, 30.0), (0.1, 30.0)]
-    result = minimize(neg_log_likelihood, x0_base, args=(df,), method='L-BFGS-B', bounds=bounds_full)
-    models["Full (B×FR, T×FR×TP)"] = {"k": 9, "nll": result.fun}
-    if verbose:
+    def fit_variant(name, nll_fn, x0, bounds, k):
+        print(f"  {name}...", end=" ", flush=True)
+        result = minimize(nll_fn, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
         print(f"NLL={result.fun:.1f}")
+        return {"k": k, "nll": result.fun}
 
-    # Model 2: Shared B_HF (8 params)
-    if verbose:
-        print("  Shared B_HF (8 params)...", end=" ", flush=True)
-    x0 = [x0_base[0], (x0_base[1]+x0_base[2])/2, x0_base[3], x0_base[4]] + x0_base[5:]
-    bounds = [(0.1, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-              (0.1, 30.0), (0.1, 30.0), (0.1, 30.0), (0.1, 30.0)]
-    result = minimize(nll_shared_B, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
-    models["Shared B_HF (T×FR×TP)"] = {"k": 8, "nll": result.fun}
-    if verbose:
-        print(f"NLL={result.fun:.1f}")
+    bounds_9 = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
+                (0.1, 30.0), (0.1, 30.0), (0.1, 30.0), (0.1, 30.0)]
+    bounds_8_T = [(0.1, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
+                  (0.1, 30.0), (0.1, 30.0), (0.1, 30.0), (0.1, 30.0)]
+    bounds_8_g = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
+                  (0.1, 30.0), (0.1, 30.0), (-10.0, 10.0)]
+    bounds_7 = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
+                (0.1, 30.0), (0.1, 30.0)]
+    bounds_6 = [(0.1, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
+                (0.1, 30.0), (0.1, 30.0)]
 
-    # Model 3: Shared T across FR (7 params)
-    if verbose:
-        print("  Shared T (7 params)...", end=" ", flush=True)
-    x0 = x0_base[:5] + [(x0_base[5]+x0_base[7])/2, (x0_base[6]+x0_base[8])/2]
-    bounds = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-              (0.1, 30.0), (0.1, 30.0)]
-    result = minimize(nll_shared_T, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
-    models["Shared T (B×FR, T×TP)"] = {"k": 7, "nll": result.fun}
-    if verbose:
-        print(f"NLL={result.fun:.1f}")
+    models["Full (B×FR, T×FR×TP)"] = fit_variant(
+        "Full (9 params)", neg_log_likelihood, x0_base, bounds_9, 9)
+    models["Shared B_HF (T×FR×TP)"] = fit_variant(
+        "Shared B_HF (8 params)", nll_shared_B,
+        [x0_base[0], (x0_base[1]+x0_base[2])/2, x0_base[3], x0_base[4]] + x0_base[5:],
+        bounds_8_T, 8)
+    models["Shared T (B×FR, T×TP)"] = fit_variant(
+        "Shared T (7 params)", nll_shared_T,
+        x0_base[:5] + [(x0_base[5]+x0_base[7])/2, (x0_base[6]+x0_base[8])/2],
+        bounds_7, 7)
+    models["Minimal (shared B, T×TP)"] = fit_variant(
+        "Minimal (6 params)", nll_minimal,
+        [x0_base[0], (x0_base[1]+x0_base[2])/2, x0_base[3], x0_base[4],
+         (x0_base[5]+x0_base[7])/2, (x0_base[6]+x0_base[8])/2],
+        bounds_6, 6)
+    models["Interaction (B×FR, T+γ)"] = fit_variant(
+        "Interaction (8 params)", nll_interaction,
+        x0_base[:5] + [x0_base[5], x0_base[6], x0_base[7] - x0_base[5]],
+        bounds_8_g, 8)
 
-    # Model 4: Minimal (6 params)
-    if verbose:
-        print("  Minimal (6 params)...", end=" ", flush=True)
-    x0 = [x0_base[0], (x0_base[1]+x0_base[2])/2, x0_base[3], x0_base[4],
-          (x0_base[5]+x0_base[7])/2, (x0_base[6]+x0_base[8])/2]
-    bounds = [(0.1, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3), (0.1, 30.0), (0.1, 30.0)]
-    result = minimize(nll_minimal, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
-    models["Minimal (shared B, T×TP)"] = {"k": 6, "nll": result.fun}
-    if verbose:
-        print(f"NLL={result.fun:.1f}")
-
-    # Model 5: Interaction model (8 params)
-    if verbose:
-        print("  Interaction (8 params)...", end=" ", flush=True)
-    gamma_init = x0_base[7] - x0_base[5]  # T_14_5 - T_12_5
-    x0 = x0_base[:5] + [x0_base[5], x0_base[6], gamma_init]
-    bounds = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-              (0.1, 30.0), (0.1, 30.0), (-10.0, 10.0)]
-    result = minimize(nll_interaction, x0, args=(df,), method='L-BFGS-B', bounds=bounds)
-    models["Interaction (B×FR, T+γ)"] = {"k": 8, "nll": result.fun}
-    if verbose:
-        print(f"NLL={result.fun:.1f}")
-
-    # Compute AIC and BIC
-    for name, m in models.items():
+    for m in models.values():
         m["aic"] = 2 * m["k"] + 2 * m["nll"]
         m["bic"] = m["k"] * np.log(n_obs) + 2 * m["nll"]
 
@@ -651,16 +332,9 @@ def main():
             print(f"  Condition T={tp}s, FR={fr}: {n:,} trials")
     print()
 
-    # Bin data (for visualization only)
-    conditions = get_binned_data(df)
-
-    # Fit model on trial-level data
     print("-" * 70)
-    params = fit_model(df, verbose=True)
+    params = fit_model(df)
     print()
-
-    # Compute fit statistics
-    #fit_stats = compute_fit_stats(params, conditions)
 
     # Print results
     print("=" * 70)
@@ -697,39 +371,13 @@ def main():
     print(f"  Ratio: {delta_T_12 / delta_T_14:.2f}x")
     print()
 
-    print("=" * 70)
-    print("FIT STATISTICS")
-    print("=" * 70)
-    print()
-    #for (tp, fr) in [(5, "1:2"), (5, "1:4"), (10, "1:2"), (10, "1:4")]:
-    #    r2 = fit_stats[(tp, fr)]["r2"]
-    #    print(f"  T={tp}s, FR={fr}: R² = {r2:.4f}")
-    print()
-    #print(f"  Overall: R² = {fit_stats['overall']['r2']:.4f}")
-    print()
-
     # Plot
     print("-" * 70)
     plot_fit(params, conditions)
 
     # Save parameters
-    np.savez(
-        "fitted_params.npz",
-        # Core Interaction model params (8)
-        sigma=params["sigma"],
-        B_hf_12=params["B_hf_12"],
-        B_hf_14=params["B_hf_14"],
-        delta=params["delta"],
-        lapse=params["lapse"],
-        T_5=params["T_5"],
-        T_10=params["T_10"],
-        gamma=params["gamma"],
-        # Derived T values for convenience
-        T_12_5=params["T_12_5"],
-        T_12_10=params["T_12_10"],
-        T_14_5=params["T_14_5"],
-        T_14_10=params["T_14_10"],
-    )
+    np.savez("fitted_params.npz", **{k: v for k, v in params.items()
+                                      if k not in ["nll", "n_trials"]})
     print("Saved fitted_params.npz")
     print()
 
@@ -738,8 +386,8 @@ def main():
     print("MODEL COMPARISON")
     print("=" * 70)
     print()
-    print("Fitting 5 model variants (L-BFGS-B)...")
-    model_variants, n_obs = fit_model_comparison(df, full_params=params, verbose=True)
+    print("Fitting model variants...")
+    model_variants, n_obs = fit_model_comparison(df, full_params=params)
     print()
 
     # Sort by AIC
@@ -789,8 +437,8 @@ def main():
     print(f"  Interaction vs Min:  LR = {lr_stat:.2f}, df = {df}, p = {p_val:.3f}")
     print()
 
-    return params, fit_stats
+    return params
 
 
 if __name__ == "__main__":
-    params, fit_stats = main()
+    params = main()
