@@ -80,52 +80,19 @@ def load_data():
 # =============================================================================
 
 def neg_log_likelihood(params, df):
-    """
-    Compute negative log-likelihood on trial-level data (vectorized).
-
-    Parameters (9 total):
-        - sigma, B_hf_12, B_hf_14, delta, lapse
-        - T_12_5, T_12_10, T_14_5, T_14_10
-    """
-    sigma, B_hf_12, B_hf_14, delta, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
-
-    # Parameter bounds
-    if sigma <= 0.05 or sigma > 2.0:
-        return 1e10
-    if delta <= 0 or delta > 50:
-        return 1e10
-    if lapse < 0 or lapse > 0.5:
+    """Full model (8 params, delta fixed to 1)."""
+    sigma, B_hf_12, B_hf_14, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
         return 1e10
     if any(t <= 0 for t in [T_12_5, T_12_10, T_14_5, T_14_10]):
         return 1e10
-
-    # Vectorized condition mapping
     tp = df["time_pressure"].values
     fr_is_12 = (df["frequency_ratio"] == "1:2").values
-
-    T = np.where(
-        (tp == 5) & fr_is_12, T_12_5,
-        np.where((tp == 10) & fr_is_12, T_12_10,
-            np.where(tp == 5, T_14_5, T_14_10)))
+    T = np.where((tp == 5) & fr_is_12, T_12_5,
+            np.where((tp == 10) & fr_is_12, T_12_10,
+                np.where(tp == 5, T_14_5, T_14_10)))
     B_hf = np.where(fr_is_12, B_hf_12, B_hf_14)
-
-    # Vectorized race model computation
-    theta = df["theta"].values
-    try:
-        probs = _race_model_vec(
-            jnp.array(theta), sigma,
-            jnp.array(B_hf), delta,
-            jnp.array(T), lapse
-        )
-        p_lf = np.array(probs[:, 1])  # LF is index 1
-    except:
-        return 1e10
-
-    # Clip and compute NLL
-    eps = 1e-10
-    p_lf = np.clip(p_lf, eps, 1 - eps)
-    y = df["is_lf"].values
-    return -np.sum(y * np.log(p_lf) + (1 - y) * np.log(1 - p_lf))
+    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, sigma, lapse)
 
 
 # =============================================================================
@@ -133,15 +100,14 @@ def neg_log_likelihood(params, df):
 # =============================================================================
 
 def fit_model(df):
-    """Fit Interaction model using trial-level negative log-likelihood."""
-    x0 = [0.2, 0.5, 0.9, 0.5, 0.15, 4.0, 6.0, 1.5]
+    """Fit Interaction model (delta fixed to 1)."""
+    x0 = [0.2, 0.5, 0.9, 0.15, 2.0, 3.5, 1.0]
 
     print(f"Fitting Interaction model ({len(df):,} trials)...")
     result = minimize(nll_interaction, x0, args=(df,), method='Nelder-Mead',
                       options={'maxiter': 2000, 'xatol': 1e-4, 'fatol': 1e-4})
 
-    param_names = ["sigma", "B_hf_12", "B_hf_14", "delta", "lapse",
-                   "T_5", "T_10", "gamma"]
+    param_names = ["sigma", "B_hf_12", "B_hf_14", "lapse", "T_5", "T_10", "gamma"]
     params = {name: val for name, val in zip(param_names, result.x)}
 
     params["T_12_5"] = params["T_5"]
@@ -159,14 +125,11 @@ def fit_model(df):
 # Model Comparison
 # =============================================================================
 
-def _compute_nll_vec(theta, T, B_hf, y, sigma, delta, lapse):
-    """Vectorized NLL computation."""
+def _compute_nll_vec(theta, T, B_hf, y, sigma, lapse):
+    """Vectorized NLL computation (delta fixed to 1)."""
     try:
         probs = _race_model_vec(
-            jnp.array(theta), sigma,
-            jnp.array(B_hf), delta,
-            jnp.array(T), lapse
-        )
+            jnp.array(theta), sigma, jnp.array(B_hf), 1.0, jnp.array(T), lapse)
         p_lf = np.array(probs[:, 1])
     except:
         return 1e10
@@ -177,90 +140,72 @@ def _compute_nll_vec(theta, T, B_hf, y, sigma, delta, lapse):
 
 
 def nll_shared_B(params, df):
-    """Model with shared B_HF across frequency ratios (8 params)."""
-    sigma, B_hf, delta, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
-
-    if sigma <= 0.05 or sigma > 2.0 or delta <= 0 or delta > 50:
-        return 1e10
-    if lapse < 0 or lapse > 0.5:
+    """Shared B_HF across frequency ratios (7 params)."""
+    sigma, B_hf, lapse, T_12_5, T_12_10, T_14_5, T_14_10 = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
         return 1e10
     if any(t <= 0 for t in [T_12_5, T_12_10, T_14_5, T_14_10]):
         return 1e10
-
     tp = df["time_pressure"].values
     fr_is_12 = (df["frequency_ratio"] == "1:2").values
     T = np.where((tp == 5) & fr_is_12, T_12_5,
             np.where((tp == 10) & fr_is_12, T_12_10,
                 np.where(tp == 5, T_14_5, T_14_10)))
-    B = np.full(len(df), B_hf)
-
-    return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, delta, lapse)
+    return _compute_nll_vec(df["theta"].values, T, np.full(len(df), B_hf), df["is_lf"].values, sigma, lapse)
 
 
 def nll_shared_T(params, df):
-    """Model with shared T across frequency ratios (7 params)."""
-    sigma, B_hf_12, B_hf_14, delta, lapse, T_5, T_10 = params
-
-    if sigma <= 0.05 or sigma > 2.0 or delta <= 0 or delta > 50:
+    """Shared T across frequency ratios (6 params)."""
+    sigma, B_hf_12, B_hf_14, lapse, T_5, T_10 = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
         return 1e10
-    if lapse < 0 or lapse > 0.5 or T_5 <= 0 or T_10 <= 0:
+    if T_5 <= 0 or T_10 <= 0:
         return 1e10
-
     tp = df["time_pressure"].values
     fr_is_12 = (df["frequency_ratio"] == "1:2").values
     T = np.where(tp == 5, T_5, T_10)
     B = np.where(fr_is_12, B_hf_12, B_hf_14)
-
-    return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, delta, lapse)
+    return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, lapse)
 
 
 def nll_minimal(params, df):
-    """Minimal model: shared B_HF and shared T (6 params)."""
-    sigma, B_hf, delta, lapse, T_5, T_10 = params
-
-    if sigma <= 0.05 or sigma > 2.0 or delta <= 0 or delta > 50:
+    """Minimal: shared B_HF and shared T (5 params)."""
+    sigma, B_hf, lapse, T_5, T_10 = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
         return 1e10
-    if lapse < 0 or lapse > 0.5 or T_5 <= 0 or T_10 <= 0:
+    if T_5 <= 0 or T_10 <= 0:
         return 1e10
-
     tp = df["time_pressure"].values
     T = np.where(tp == 5, T_5, T_10)
-    B = np.full(len(df), B_hf)
-
-    return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, delta, lapse)
+    return _compute_nll_vec(df["theta"].values, T, np.full(len(df), B_hf), df["is_lf"].values, sigma, lapse)
 
 
 def nll_interaction(params, df):
-    """Interaction model: T with interaction term (8 params)."""
-    sigma, B_hf_12, B_hf_14, delta, lapse, T_5, T_10, gamma = params
-
-    if sigma <= 0.05 or sigma > 2.0 or delta <= 0 or delta > 50:
+    """Interaction model (7 params, delta fixed to 1)."""
+    sigma, B_hf_12, B_hf_14, lapse, T_5, T_10, gamma = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
         return 1e10
-    if lapse < 0 or lapse > 0.5 or T_5 <= 0 or T_10 <= 0:
+    if T_5 <= 0 or T_10 <= 0:
         return 1e10
-
     tp = df["time_pressure"].values
     fr_is_12 = (df["frequency_ratio"] == "1:2").values
     T = np.where(tp == 5, T_5, T_10) + np.where((tp == 5) & ~fr_is_12, gamma, 0)
     B = np.where(fr_is_12, B_hf_12, B_hf_14)
-
-    return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, delta, lapse)
+    return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, lapse)
 
 
 def fit_model_comparison(df, full_params=None):
-    """Fit all model variants and compare using AIC/BIC."""
+    """Fit all model variants and compare using AIC/BIC. Delta fixed to 1."""
     n_obs = len(df)
     models = {}
 
+    # Base starting values: sigma, B_12, B_14, lapse, T_12_5, T_12_10, T_14_5, T_14_10
     if full_params is None:
-        x0_base = [0.2, 0.5, 0.9, 0.4, 0.15, 6.0, 9.0, 7.0, 8.0]
+        x0 = [0.2, 0.5, 0.9, 0.15, 2.0, 3.5, 3.0, 3.5]
     else:
-        x0_base = [
-            full_params["sigma"], full_params["B_hf_12"], full_params["B_hf_14"],
-            full_params["delta"], full_params["lapse"],
-            full_params["T_12_5"], full_params["T_12_10"],
-            full_params["T_14_5"], full_params["T_14_10"]
-        ]
+        x0 = [full_params["sigma"], full_params["B_hf_12"], full_params["B_hf_14"],
+              full_params["lapse"], full_params["T_12_5"], full_params["T_12_10"],
+              full_params["T_14_5"], full_params["T_14_10"]]
 
     def fit_variant(name, nll_fn, x0, bounds, k):
         print(f"  {name}...", end=" ", flush=True)
@@ -268,36 +213,27 @@ def fit_model_comparison(df, full_params=None):
         print(f"NLL={result.fun:.1f}")
         return {"k": k, "nll": result.fun}
 
-    bounds_9 = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-                (0.1, 30.0), (0.1, 30.0), (0.1, 30.0), (0.1, 30.0)]
-    bounds_8_T = [(0.1, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-                  (0.1, 30.0), (0.1, 30.0), (0.1, 30.0), (0.1, 30.0)]
-    bounds_8_g = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-                  (0.1, 30.0), (0.1, 30.0), (-10.0, 10.0)]
-    bounds_7 = [(0.1, 2.0), (-2.0, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-                (0.1, 30.0), (0.1, 30.0)]
-    bounds_6 = [(0.1, 2.0), (-2.0, 2.0), (0.1, 10.0), (0.01, 0.3),
-                (0.1, 30.0), (0.1, 30.0)]
+    # Bounds for each model variant
+    b_sig = (0.1, 2.0)
+    b_B = (-2.0, 2.0)
+    b_lapse = (0.01, 0.3)
+    b_T = (0.1, 30.0)
+    b_gamma = (-10.0, 10.0)
 
-    models["Full (B×FR, T×FR×TP)"] = fit_variant(
-        "Full (9 params)", neg_log_likelihood, x0_base, bounds_9, 9)
-    models["Shared B_HF (T×FR×TP)"] = fit_variant(
-        "Shared B_HF (8 params)", nll_shared_B,
-        [x0_base[0], (x0_base[1]+x0_base[2])/2, x0_base[3], x0_base[4]] + x0_base[5:],
-        bounds_8_T, 8)
-    models["Shared T (B×FR, T×TP)"] = fit_variant(
-        "Shared T (7 params)", nll_shared_T,
-        x0_base[:5] + [(x0_base[5]+x0_base[7])/2, (x0_base[6]+x0_base[8])/2],
-        bounds_7, 7)
-    models["Minimal (shared B, T×TP)"] = fit_variant(
-        "Minimal (6 params)", nll_minimal,
-        [x0_base[0], (x0_base[1]+x0_base[2])/2, x0_base[3], x0_base[4],
-         (x0_base[5]+x0_base[7])/2, (x0_base[6]+x0_base[8])/2],
-        bounds_6, 6)
-    models["Interaction (B×FR, T+γ)"] = fit_variant(
-        "Interaction (8 params)", nll_interaction,
-        x0_base[:5] + [x0_base[5], x0_base[6], x0_base[7] - x0_base[5]],
-        bounds_8_g, 8)
+    models["Full (B×FR, T×FR×TP)"] = fit_variant("Full (8)", neg_log_likelihood,
+        x0, [b_sig, b_B, b_B, b_lapse, b_T, b_T, b_T, b_T], 8)
+    models["Shared B_HF (T×FR×TP)"] = fit_variant("Shared B (7)", nll_shared_B,
+        [x0[0], (x0[1]+x0[2])/2, x0[3], x0[4], x0[5], x0[6], x0[7]],
+        [b_sig, b_B, b_lapse, b_T, b_T, b_T, b_T], 7)
+    models["Shared T (B×FR, T×TP)"] = fit_variant("Shared T (6)", nll_shared_T,
+        [x0[0], x0[1], x0[2], x0[3], (x0[4]+x0[6])/2, (x0[5]+x0[7])/2],
+        [b_sig, b_B, b_B, b_lapse, b_T, b_T], 6)
+    models["Minimal (shared B, T×TP)"] = fit_variant("Minimal (5)", nll_minimal,
+        [x0[0], (x0[1]+x0[2])/2, x0[3], (x0[4]+x0[6])/2, (x0[5]+x0[7])/2],
+        [b_sig, b_B, b_lapse, b_T, b_T], 5)
+    models["Interaction (B×FR, T+γ)"] = fit_variant("Interaction (7)", nll_interaction,
+        [x0[0], x0[1], x0[2], x0[3], x0[4], x0[5], x0[6] - x0[4]],
+        [b_sig, b_B, b_B, b_lapse, b_T, b_T, b_gamma], 7)
 
     for m in models.values():
         m["aic"] = 2 * m["k"] + 2 * m["nll"]
@@ -338,9 +274,8 @@ def main():
     print("FITTED PARAMETERS")
     print("=" * 70)
     print()
-    print("Shared across conditions:")
+    print("Shared across conditions (δ fixed to 1):")
     print(f"  σ (semantic width) = {params['sigma']:.3f}")
-    print(f"  δ (drift rate)     = {params['delta']:.3f}")
     print(f"  λ (lapse rate)     = {params['lapse']:.3f}")
     print()
     print("By frequency ratio:")
@@ -400,34 +335,21 @@ def main():
     print("Likelihood Ratio Tests (nested models):")
     print("-" * 60)
 
-    # Full vs Interaction: tests whether T_10 can be shared across FR
     nll_full = model_variants["Full (B×FR, T×FR×TP)"]["nll"]
-    nll_interaction = model_variants["Interaction (B×FR, T+γ)"]["nll"]
-    lr_stat = 2 * (nll_interaction - nll_full)
-    df = 9 - 8  # 1 parameter difference
-    p_val = 1 - chi2.cdf(lr_stat, df)
-    print(f"  Full vs Interaction: LR = {lr_stat:.2f}, df = {df}, p = {p_val:.3f}")
-
-    # Full vs Shared T: tests whether T can be shared across FR
+    nll_int = model_variants["Interaction (B×FR, T+γ)"]["nll"]
     nll_shared_t = model_variants["Shared T (B×FR, T×TP)"]["nll"]
-    lr_stat = 2 * (nll_shared_t - nll_full)
-    df = 9 - 7  # 2 parameter difference
-    p_val = 1 - chi2.cdf(lr_stat, df)
-    print(f"  Full vs Shared T:    LR = {lr_stat:.2f}, df = {df}, p = {p_val:.3f}")
-
-    # Full vs Shared B: tests whether B_HF varies by FR
     nll_shared_b = model_variants["Shared B_HF (T×FR×TP)"]["nll"]
-    lr_stat = 2 * (nll_shared_b - nll_full)
-    df = 9 - 8  # 1 parameter difference
-    p_val = 1 - chi2.cdf(lr_stat, df)
-    print(f"  Full vs Shared B:    LR = {lr_stat:.2f}, df = {df}, p = {p_val:.3f}")
 
-    # Interaction vs Minimal: tests whether B_HF varies by FR (within interaction structure)
-    nll_minimal = model_variants["Minimal (shared B, T×TP)"]["nll"]
-    lr_stat = 2 * (nll_minimal - nll_interaction)
-    df = 8 - 6  # 2 parameter difference
-    p_val = 1 - chi2.cdf(lr_stat, df)
-    print(f"  Interaction vs Min:  LR = {lr_stat:.2f}, df = {df}, p = {p_val:.3f}")
+    lr = 2 * (nll_int - nll_full)
+    print(f"  Full vs Interaction: LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
+    lr = 2 * (nll_shared_t - nll_full)
+    print(f"  Full vs Shared T:    LR = {lr:.2f}, df = 2, p = {1 - chi2.cdf(lr, 2):.3f}")
+    lr = 2 * (nll_shared_b - nll_full)
+    print(f"  Full vs Shared B:    LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
+
+    nll_min = model_variants["Minimal (shared B, T×TP)"]["nll"]
+    lr = 2 * (nll_min - nll_int)
+    print(f"  Interaction vs Min:  LR = {lr:.2f}, df = 2, p = {1 - chi2.cdf(lr, 2):.3f}")
     print()
 
     return params
