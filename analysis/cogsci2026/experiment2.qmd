@@ -13,8 +13,6 @@ execute:
   message: false
 ---
 
-**How to run:** This document contains **data preprocessing, descriptive stats, and statistical models** (no Python). From the repo root, render it with Quarto (e.g. "Render" or `quarto render analysis/cogsci2026/experiment2.qmd`). Race model figures live in **`experiment2_race_model.qmd`** — run `python models/fit_exp2.py` first, then render that file.
-
 ```{r setup}
 library(tidyverse)
 library(tidyboot)
