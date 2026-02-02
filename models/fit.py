@@ -194,6 +194,31 @@ def nll_interaction(params, df):
     return _compute_nll_vec(df["theta"].values, T, B, df["is_lf"].values, sigma, lapse)
 
 
+def nll_shared_B_interaction(params, df):
+    """Shared B_HF with T interaction (6 params, delta fixed to 1)."""
+    sigma, B_hf, lapse, T_5, T_10, gamma = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
+        return 1e10
+    if T_5 <= 0 or T_10 <= 0:
+        return 1e10
+    tp = df["time_pressure"].values
+    fr_is_12 = (df["frequency_ratio"] == "1:2").values
+    T = np.where(tp == 5, T_5, T_10) + np.where((tp == 5) & ~fr_is_12, gamma, 0)
+    return _compute_nll_vec(df["theta"].values, T, np.full(len(df), B_hf), df["is_lf"].values, sigma, lapse)
+
+
+def nll_no_TP_effect(params, df):
+    """B_HF varies by FR, but T is shared across time pressure (5 params)."""
+    sigma, B_hf_12, B_hf_14, lapse, T = params
+    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
+        return 1e10
+    if T <= 0:
+        return 1e10
+    fr_is_12 = (df["frequency_ratio"] == "1:2").values
+    B = np.where(fr_is_12, B_hf_12, B_hf_14)
+    return _compute_nll_vec(df["theta"].values, np.full(len(df), T), B, df["is_lf"].values, sigma, lapse)
+
+
 def fit_model_comparison(df, full_params=None):
     """Fit all model variants and compare using AIC/BIC. Delta fixed to 1."""
     n_obs = len(df)
@@ -234,6 +259,12 @@ def fit_model_comparison(df, full_params=None):
     models["Interaction (B×FR, T+γ)"] = fit_variant("Interaction (7)", nll_interaction,
         [x0[0], x0[1], x0[2], x0[3], x0[4], x0[5], x0[6] - x0[4]],
         [b_sig, b_B, b_B, b_lapse, b_T, b_T, b_gamma], 7)
+    models["Shared B + Interaction (T+γ)"] = fit_variant("Shared B + Int (6)", nll_shared_B_interaction,
+        [x0[0], (x0[1]+x0[2])/2, x0[3], x0[4], x0[5], x0[6] - x0[4]],
+        [b_sig, b_B, b_lapse, b_T, b_T, b_gamma], 6)
+    models["No TP effect (B×FR, T shared)"] = fit_variant("No TP effect (5)", nll_no_TP_effect,
+        [x0[0], x0[1], x0[2], x0[3], (x0[4]+x0[5]+x0[6]+x0[7])/4],
+        [b_sig, b_B, b_B, b_lapse, b_T], 5)
 
     for m in models.values():
         m["aic"] = 2 * m["k"] + 2 * m["nll"]
@@ -332,24 +363,28 @@ def main():
     print()
 
     # Likelihood ratio tests for nested models
-    print("Likelihood Ratio Tests (nested models):")
+    print("Likelihood Ratio Tests (against Interaction model):")
     print("-" * 60)
 
-    nll_full = model_variants["Full (B×FR, T×FR×TP)"]["nll"]
     nll_int = model_variants["Interaction (B×FR, T+γ)"]["nll"]
     nll_shared_t = model_variants["Shared T (B×FR, T×TP)"]["nll"]
-    nll_shared_b = model_variants["Shared B_HF (T×FR×TP)"]["nll"]
+    nll_shared_b_int = model_variants["Shared B + Interaction (T+γ)"]["nll"]
+    nll_no_tp = model_variants["No TP effect (B×FR, T shared)"]["nll"]
 
-    lr = 2 * (nll_int - nll_full)
-    print(f"  Full vs Interaction: LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
-    lr = 2 * (nll_shared_t - nll_full)
-    print(f"  Full vs Shared T:    LR = {lr:.2f}, df = 2, p = {1 - chi2.cdf(lr, 2):.3f}")
-    lr = 2 * (nll_shared_b - nll_full)
-    print(f"  Full vs Shared B:    LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
+    # Test B_HF variation: Interaction vs Shared B + Interaction
+    lr = 2 * (nll_shared_b_int - nll_int)
+    print(f"  Effect of B_HF × FR:       LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
+    print(f"    (Interaction vs Shared B + Interaction)")
 
-    nll_min = model_variants["Minimal (shared B, T×TP)"]["nll"]
-    lr = 2 * (nll_min - nll_int)
-    print(f"  Interaction vs Min:  LR = {lr:.2f}, df = 2, p = {1 - chi2.cdf(lr, 2):.3f}")
+    # Test T main effect of time pressure: Interaction vs No TP effect
+    lr = 2 * (nll_no_tp - nll_int)
+    print(f"  Effect of T × TP:          LR = {lr:.2f}, df = 2, p = {1 - chi2.cdf(lr, 2):.3f}")
+    print(f"    (Interaction vs No TP effect)")
+
+    # Test T interaction: Interaction vs Shared T
+    lr = 2 * (nll_shared_t - nll_int)
+    print(f"  Effect of T × FR (γ):      LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
+    print(f"    (Interaction vs Shared T)")
     print()
 
     return params
