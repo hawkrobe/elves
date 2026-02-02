@@ -1,0 +1,214 @@
+---
+title: "Experiment 1: Race Model Plots"
+author: "Elves Project Team"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    fig-width: 10
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+---
+
+
+```{r setup}
+library(tidyverse)
+library(here)
+
+fig_path <- here("latex", "figures")
+theme_fig <- theme_minimal(base_size = 12) +
+  theme(
+    legend.position = c(0.75, 0.85),
+    legend.background = element_rect(fill = "white", color = NA),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# 1. P(LF) vs distance: model fit
+
+Uses `race_model_predictions_exp1.csv` (curves) and `race_model_data_exp1.csv` (trial-level data the model was fit to). Same data as the Python plot.
+
+```{r paths}
+pred_race_exp1_path <- here("models", "race_model_predictions_exp1.csv")
+race_data_exp1_path  <- here("models", "race_model_data_exp1.csv")
+```
+
+```{r race-model-PLF-plot, fig.width=10, fig.height=5, fig.cap="P(LF) vs distance from LF: race model predictions and binned data (same trial set as Python fit). Facets: frequency ratio; Strict (5s) = red, Lenient (10s) = blue."}
+if (!file.exists(pred_race_exp1_path) || !file.exists(race_data_exp1_path)) {
+  ggplot() +
+    annotate("text", x = 1, y = 1,
+             label = "Run from repo root:\n  python models/fit.py\n\nthen re-render this document.", size = 4) +
+    theme_void()
+} else {
+  pred_race_exp1 <- read_csv(pred_race_exp1_path, show_col_types = FALSE) |>
+    mutate(time_pressure = as.integer(time_pressure))
+  d_for_race <- read_csv(race_data_exp1_path, show_col_types = FALSE) |>
+    mutate(time_pressure = as.integer(time_pressure))
+
+  n_bins_race <- 9
+  breaks_race <- seq(0, 45, length.out = n_bins_race + 1)
+  d_binned_race_exp1 <- d_for_race |>
+    mutate(dist_bin = cut(dist_to_lf, breaks = breaks_race, include.lowest = TRUE)) |>
+    group_by(frequency_ratio, time_pressure, dist_bin) |>
+    summarise(
+      dist_mean = mean(dist_to_lf),
+      p_lf_mean = mean(responded_lf),
+      n = n(),
+      .groups = "drop"
+    ) |>
+    mutate(p_lf_se = sqrt(p_lf_mean * (1 - p_lf_mean) / n))
+
+  # Strict vs Lenient: amber / magenta (time pressure only; red/blue reserved for frequency)
+  colors_tp_race <- c("5" = "#D4A017", "10" = "#9C27B0")
+
+  p_race_plf <- ggplot(pred_race_exp1, aes(x = dist_to_lf, y = p_lf, color = factor(time_pressure))) +
+    geom_errorbar(
+      data = d_binned_race_exp1,
+      aes(x = dist_mean, ymin = p_lf_mean - p_lf_se, ymax = p_lf_mean + p_lf_se, color = factor(time_pressure)),
+      width = 1, linewidth = 0.6, inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = d_binned_race_exp1,
+      aes(x = dist_mean, y = p_lf_mean, color = factor(time_pressure)),
+      size = 2.5, inherit.aes = FALSE
+    ) +
+    geom_line(linewidth = 1.2) +
+    geom_vline(xintercept = 22.5, linetype = "dashed", color = "gray50") +
+    facet_wrap(~ frequency_ratio, ncol = 2, labeller = as_labeller(c("1:2" = "Frequency ratio 1:2", "1:4" = "Frequency ratio 1:4"))) +
+    scale_color_manual(values = colors_tp_race, labels = c("Strict (5s)", "Lenient (10s)")) +
+    scale_x_continuous(limits = c(0, 45), breaks = seq(0, 45, by = 10)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+    labs(x = "Distance from LF (deg)", y = "P(LF)", color = "Time pressure") +
+    theme_fig
+
+  p_race_plf
+}
+
+ggsave(here(fig_path, "race_model_fit.pdf"), width = 6, height = 4)
+```
+
+# 2. Decision time parameter plot (schematic)
+
+Activation vs effective time at θ = 0.5 (LF prototype). Vertical lines = fitted T (Strict / Lenient).
+
+```{r race-schematic-exp1, fig.width=6, fig.height=4, fig.cap="Activation vs effective time. Columns = frequency ratio; vertical lines = fitted T (Strict / Lenient)."}
+schematic_data_path <- here("models", "race_model_schematic_data.csv")
+schematic_params_path <- here("models", "race_model_schematic_params.csv")
+params_path <- here("models", "fitted_params_exp1.csv")
+
+  d_schematic <- read_csv(schematic_data_path, show_col_types = FALSE)
+  p_schematic <- read_csv(schematic_params_path, show_col_types = FALSE)
+  params_exp1 <- read_csv(params_path, show_col_types = FALSE)
+
+  deadlines <- tibble(
+    frequency_ratio = rep(c("1:2", "1:4"), each = 2),
+    deadline = rep(c("Strict (5s)", "Lenient (10s)"), 2),
+    t = c(params_exp1$T_12_5[1], params_exp1$T_12_10[1],
+          params_exp1$T_14_5[1], params_exp1$T_14_10[1])
+  )
+
+  # HF vs LF: red / blue (frequency encoding)
+  colors_word <- c("HF" = "#C0392B", "LF" = "#2980B9")
+  # Strict vs Lenient: amber / magenta (match P(LF) plot)
+  colors_deadline <- c("Strict (5s)" = "#D4A017", "Lenient (10s)" = "#9C27B0")
+
+  activation_schematic_exp1 <- ggplot(d_schematic, aes(x = t, y = activation, color = word)) +
+    geom_line(aes(color = word, linetype = frequency_ratio), linewidth = 1.2) +
+    geom_vline(data = deadlines, aes(xintercept = t, color = deadline, linetype = frequency_ratio), linewidth = 0.8, alpha = 0.8) +
+    #facet_wrap(~ frequency_ratio, ncol = 2, labeller = as_labeller(c("1:2" = "FR 1:2", "1:4" = "FR 1:4"))) +
+    scale_color_manual(
+      values = c(colors_word, colors_deadline),
+      breaks = c("HF", "LF", "Strict (5s)", "Lenient (10s)"),
+      labels = c("HF", "LF", "Strict (5s)", "Lenient (10s)")
+    ) +
+    labs(x = "Effective decision time T", y = "Activation", color = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "none", panel.grid.minor = element_blank(), strip.text = element_text(face = "bold")) +
+    coord_cartesian(xlim = c(0, 4), ylim = c(0, 10))
+  
+  
+  activation_schematic_exp1
+ggsave(here(fig_path, "race_model_schematic.pdf"), width = 4, height = 4)
+```
+
+# 3. P(LF) and P(HF) vs decision time
+
+```{r race-PLF-PHF-vs-time, fig.width=10, fig.height=5, fig.cap="P(LF) and P(HF) vs effective decision time T at θ = 0.5 (LF prototype). Vertical lines = fitted Strict / Lenient T."}
+plf_phf_time_path <- here("models", "race_model_P_LF_P_HF_vs_time_exp1_LF_prototype.csv")
+
+if (file.exists(plf_phf_time_path)) {
+  d_plf_phf_time <- read_csv(plf_phf_time_path, show_col_types = FALSE) |>
+    pivot_longer(c(p_lf, p_hf), names_to = "response", values_to = "probability") |>
+    mutate(response = ifelse(response == "p_lf", "P(LF)", "P(HF)"))
+
+  # P(LF)/P(HF) = blue/red; Strict/Lenient vlines = amber/magenta; FR 1:2 = solid, FR 1:4 = dashed
+  colors_response <- c("P(LF)" = "#2980B9", "P(HF)" = "#C0392B")
+  colors_deadline_plfphf <- c("Strict (5s)" = "#D4A017", "Lenient (10s)" = "#9C27B0")
+  d_plf_phf_time <- d_plf_phf_time |>
+    mutate(frequency_ratio = factor(frequency_ratio, levels = c("1:2", "1:4")))
+
+  p_plf_phf_time <- ggplot(d_plf_phf_time, aes(x = T, y = probability, color = response, linetype = frequency_ratio)) +
+    geom_line(linewidth = 1.2) +
+    scale_color_manual(values = colors_response) +
+    scale_linetype_manual(values = c("1:2" = "solid", "1:4" = "dashed"),
+                          labels = c("1:2" = "FR 1:2", "1:4" = "FR 1:4")) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25), expand = c(0, 0)) +
+    labs(x = "Effective decision time T", y = "Probability", color = NULL, linetype = "Frequency ratio") +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank())
+
+  if (file.exists(params_path)) {
+    params_exp1 <- read_csv(params_path, show_col_types = FALSE)
+    params_exp1_t <- params_exp1 |>
+      select(T_12_5, T_12_10, T_14_5, T_14_10) |>
+      pivot_longer(everything(), names_to = "condition", values_to = "t") |>
+      mutate(
+        frequency_ratio = factor(case_when(
+          condition %in% c("T_12_5", "T_12_10") ~ "1:2",
+          condition %in% c("T_14_5", "T_14_10") ~ "1:4"
+        ), levels = c("1:2", "1:4")),
+        deadline = case_when(
+          condition %in% c("T_12_5", "T_14_5") ~ "Strict (5s)",
+          condition %in% c("T_12_10", "T_14_10") ~ "Lenient (10s)"
+        )
+      )
+    p_plf_phf_time <- p_plf_phf_time +
+      geom_vline(
+        data = params_exp1_t,
+        aes(xintercept = t, color = deadline, linetype = frequency_ratio),
+        linewidth = 0.8, alpha = 0.9
+      ) +
+      scale_color_manual(
+        values = c(colors_response, colors_deadline_plfphf),
+        breaks = c("P(LF)", "P(HF)", "Strict (5s)", "Lenient (10s)"),
+        name = NULL
+      ) +
+      scale_linetype_manual(
+        values = c("1:2" = "solid", "1:4" = "dashed"),
+        labels = c("1:2" = "FR 1:2", "1:4" = "FR 1:4"),
+        name = "Frequency ratio"
+      ) + xlim(0, 4)
+  }
+  p_plf_phf_time
+} else {
+  ggplot() +
+    annotate("text", x = 1, y = 1, label = "Run: python models/fit.py", size = 4) +
+    theme_void()
+}
+
+ggsave(here(fig_path, "race_model_prob_time.pdf"), width = 4, height = 2)
+```
+
+```{r fig.width=9, fig.height=4}
+library(patchwork)
+# Layout: A = schematic (top-left), B = P(LF)/P(HF) vs time (bottom-left), C = P(LF) vs distance (right, full height).
+(((activation_schematic_exp1 / p_plf_phf_time) +  plot_layout(axes = "collect") )| p_race_plf) +  plot_layout(widths = c(1, 2))+ plot_annotation(tag_levels = 'A')
+
+ggsave(here(fig_path, "exp_1_results_combined.pdf"), width = 9, height = 4)
+```
+

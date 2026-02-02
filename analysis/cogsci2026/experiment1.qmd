@@ -13,6 +13,7 @@ execute:
   message: false
 ---
 
+
 ```{r setup}
 library(tidyverse)
 library(tidyboot)
@@ -397,6 +398,7 @@ ggplot(d_binned_chose_nearest_fr, aes(x = dist_mean, y = empirical_stat,
   )
 ```
 
+
 # Figure 2: Empirical Results with Race Model Fit
 
 ```{r fig-setup}
@@ -551,15 +553,16 @@ fitted_T <- tibble(
 rt_comparison <- rt_by_condition |>
   left_join(fitted_T, by = c("time_pressure", "frequency_ratio")) |>
   mutate(
-    ratio = T_fitted / M_rt
+    ratio = T_fitted / M_rt)
+  rt_comparison <- rt_by_condition |>
+    left_join(fitted_T, by = c("time_pressure", "frequency_ratio")) |>
+    mutate(ratio = T_fitted / M_rt)
+  knitr::kable(
+    rt_comparison,
+    digits = 2,
+    col.names = c("Time Pressure (s)", "Freq Ratio", "Mean RT (s)", "SD RT (s)", "N", "Fitted T", "T/RT Ratio"),
+    caption = "Comparison of empirical mean RTs and fitted T parameters from race model"
   )
-
-knitr::kable(
-  rt_comparison,
-  digits = 2,
-  col.names = c("Time Pressure (s)", "Freq Ratio", "Mean RT (s)", "SD RT (s)", "N", "Fitted T", "T/RT Ratio"),
-  caption = "Comparison of empirical mean RTs and fitted T parameters from race model"
-)
 ```
 
 ```{r rt-convergent-validity}

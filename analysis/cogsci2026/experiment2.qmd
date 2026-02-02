@@ -13,6 +13,7 @@ execute:
   message: false
 ---
 
+**How to run:** This document contains **data preprocessing, descriptive stats, and statistical models** (no Python). From the repo root, render it with Quarto (e.g. "Render" or `quarto render analysis/cogsci2026/experiment2.qmd`). Race model figures live in **`experiment2_race_model.qmd`** — run `python models/fit_exp2.py` first, then render that file.
 
 ```{r setup}
 library(tidyverse)
@@ -34,66 +35,101 @@ fig_path <- here("latex/figures")
 # Data Preprocessing
 
 ```{r load-data}
-# Load data from two sources:
-# - exp2-0: binary payoff conditions (original data)
-# - exp2-1: linear payoff conditions (rerun with 100 participants)
+# Load data from three sources (match models/fit_exp2.py):
+# - exp2-0: binary payoff, 1:4 (exclude 1:4 linear from exp2-0 — replaced by exp2-1)
+# - exp2-1: linear payoff, 1:4
+# - exp2-2: frequency ratio 1:2 (both payoff structures)
 
-cols_needed <- c("subject_id", "frequency_ratio", "time_pressure","payoff_structure", "survey_difficulty",
+cols_needed <- c("subject_id", "frequency_ratio", "time_pressure", "payoff_structure", "survey_difficulty",
                  "is_correct", "response", "response_text", "target", "angle", "targetFreq",
                  "rt", "nearest_trained_angle", "timed_out", "total_points", "prolific_id")
 
-# Load binary conditions from exp2-0
-binary_data_path <- here("data/full-production/raw_data/exp2-0")
-binary_files <- list.files(binary_data_path, full.names = TRUE) |>
-  str_subset("training_complete", negate = TRUE)
+# Normalize column names (some CSVs use "Time Pressure" etc.)
+normalize_cols <- function(df) {
+  nms <- names(df)
+  nms_lower <- str_replace_all(str_to_lower(str_trim(nms)), "\\s+", "_")
+  canonical <- c("time_pressure", "payoff_structure", "frequency_ratio")
+  idx <- match(canonical, nms_lower)
+  for (i in seq_along(idx)) {
+    if (!is.na(idx[i]) && nms[idx[i]] != canonical[i])
+      names(df)[idx[i]] <- canonical[i]
+  }
+  df
+}
 
-raw_data_binary <- map_dfr(binary_files, \(f) {
-  read_csv(f, show_col_types = FALSE) |>
-    select(any_of(cols_needed)) |>
-    mutate(across(everything(), as.character))
-}) |>
-  filter(payoff_structure == "binary")
+load_exp2_folder <- function(folder, datasource_name) {
+  path <- here("data", "full-production", "raw_data", folder)
+  if (!dir.exists(path)) return(NULL)
+  files <- list.files(path, full.names = TRUE) |>
+    str_subset("training_complete", negate = TRUE) |>
+    str_subset("inprog", negate = TRUE)
+  if (length(files) == 0) return(NULL)
+  out <- map_dfr(files, \(f) {
+    read_csv(f, show_col_types = FALSE) |>
+      normalize_cols() |>
+      select(any_of(cols_needed)) |>
+      mutate(across(everything(), as.character))
+  })
+  out$datasource <- datasource_name
+  out
+}
 
-cat("Loaded", n_distinct(raw_data_binary$subject_id), "participants from binary conditions (exp2-0)\n")
+raw_exp2_0 <- load_exp2_folder("exp2-0", "exp2-0")
+raw_exp2_1 <- load_exp2_folder("exp2-1", "exp2-1")
+raw_exp2_2 <- load_exp2_folder("exp2-2", "exp2-2")
 
-# Load linear conditions from exp2-1 (rerun)
-linear_data_path <- here("data/full-production/raw_data/exp2-1")
-linear_files <- list.files(linear_data_path, full.names = TRUE) |>
-  str_subset("training_complete", negate = TRUE)
+if (!is.null(raw_exp2_0)) cat("Loaded", n_distinct(raw_exp2_0$subject_id), "participants from exp2-0\n")
+if (!is.null(raw_exp2_1)) cat("Loaded", n_distinct(raw_exp2_1$subject_id), "participants from exp2-1\n")
+if (!is.null(raw_exp2_2)) cat("Loaded", n_distinct(raw_exp2_2$subject_id), "participants from exp2-2\n")
 
-raw_data_linear <- map_dfr(linear_files, \(f) {
-  read_csv(f, show_col_types = FALSE) |>
-    select(any_of(cols_needed)) |>
-    mutate(across(everything(), as.character))
-}) |>
-  filter(payoff_structure == "linear")
+raw_list <- list(raw_exp2_0, raw_exp2_1, raw_exp2_2)
+raw_list <- raw_list[!sapply(raw_list, is.null)]
+raw_data <- bind_rows(raw_list)
+if (nrow(raw_data) == 0) stop("No Exp 2 raw data found under data/full-production/raw_data/exp2-0, exp2-1, exp2-2.")
 
-cat("Loaded", n_distinct(raw_data_linear$subject_id), "participants from linear conditions (exp2-1 rerun)\n")
+# Standardize payoff_structure and frequency_ratio
+raw_data <- raw_data |>
+  mutate(
+    payoff_structure = str_trim(str_to_lower(replace_na(payoff_structure, "linear"))),
+    payoff_structure = if_else(payoff_structure %in% c("linear", "binary"), payoff_structure, "linear"),
+    frequency_ratio = str_trim(replace_na(frequency_ratio, "1:4")),
+    frequency_ratio = if_else(frequency_ratio %in% c("1:2", "1:4"), frequency_ratio, "1:4")
+  )
 
-# Combine both datasets
-raw_data <- bind_rows(raw_data_binary, raw_data_linear)
+# Exclude exp2-0, 1:4, linear (replaced by exp2-1; match fit_exp2.py)
+raw_data <- raw_data |>
+  filter(!(datasource == "exp2-0" & frequency_ratio == "1:4" & payoff_structure == "linear"))
+if ("datasource" %in% names(raw_data)) raw_data <- raw_data |> select(-datasource)
+
 cat("Total:", n_distinct(raw_data$subject_id), "participants\n")
 
-participant_bonus <- raw_data |> 
+participant_bonus <- raw_data |>
   filter(is.na(prolific_id))
 ```
 
 ```{r extract-data}
-# TODO: Extract participant conditions, angle mappings, production trials
-
-# Extract participant conditions
+# Extract participant conditions (one row per subject; include frequency_ratio from exp2-0/1/2)
 participants <- raw_data |>
-  filter(!is.na(survey_difficulty)) |>
-  distinct(subject_id, payoff_structure, time_pressure) |>
-  mutate(time_pressure = as.numeric(time_pressure))
+  filter(!is.na(time_pressure)) |>
+  group_by(subject_id) |>
+  summarise(
+    time_pressure = as.numeric(first(time_pressure)),
+    payoff_structure = first(payoff_structure),
+    frequency_ratio = first(frequency_ratio),
+    .groups = "drop"
+  )
 
-# Extract angle-word mappings from exposure phase
+# Extract angle-word mappings from exposure phase (match Python: is_correct & response contains "exposure"; correct = 1 or "1"/"true"/"yes")
 angle_mappings <- raw_data |>
-  filter(!is.na(is_correct), str_detect(response, "exposure-response")) |>
-  filter(is_correct == "1") |>
+  filter(!is.na(is_correct), str_detect(str_to_lower(response), "exposure")) |>
+  filter(
+    is_correct == "1" |
+    replace_na(as.numeric(is_correct), 0) == 1 |
+    str_trim(str_to_lower(as.character(is_correct))) %in% c("1", "true", "yes")
+  ) |>
   distinct(subject_id, angle = as.numeric(angle), target, targetFreq)
 
-# Extract production trials
+# Extract production trials (match Python: next-nearest reconstructed from geometry, not jsPsych column)
 production <- raw_data |>
   filter(!is.na(nearest_trained_angle)) |>
   transmute(
@@ -108,13 +144,11 @@ production <- raw_data |>
   mutate(
     # Circular distance to nearest (handles 0°/360° wraparound)
     distance = pmin(abs(angle - nearest_trained_angle), 360 - abs(angle - nearest_trained_angle)),
-    # Compute both potential neighbors (±45° from nearest)
+    # Next-nearest = closer of ±45° neighbors (reconstruct from geometry; do not use jsPsych next_nearest_angle)
     neighbor_plus = (nearest_trained_angle + 45) %% 360,
     neighbor_minus = (nearest_trained_angle - 45 + 360) %% 360,
-    # Circular distance to each neighbor
     dist_plus = pmin(abs(angle - neighbor_plus), 360 - abs(angle - neighbor_plus)),
     dist_minus = pmin(abs(angle - neighbor_minus), 360 - abs(angle - neighbor_minus)),
-    # Next-nearest is the closer neighbor (handles 0°/360° wraparound)
     next_nearest_angle = ifelse(dist_plus < dist_minus, neighbor_plus, neighbor_minus)
   ) |>
   select(-neighbor_plus, -neighbor_minus, -dist_plus, -dist_minus)
@@ -163,7 +197,7 @@ cat("Critical trials:", sum(d_exp2$is_critical, na.rm = TRUE), "\n")
 n_participants <- n_distinct(participants$subject_id)
 
 participants |>
-  count(time_pressure, payoff_structure)
+  count(frequency_ratio, time_pressure, payoff_structure)
 ```
 
 ```{r timeout-rates}
@@ -171,6 +205,8 @@ participants |>
 ```
 
 # Critical Trial Selection
+
+**Match Python (fit_exp2.py):** between_freqs only; timed_out == 0; **200 < rt < time_pressure×1000** (rt in ms, time_pressure in s); no ambig_trial filter. No other editing of trial set.
 
 ```{r filter-critical}
 timeout_by_tp_exp2 <- d_exp2 |>
@@ -189,8 +225,15 @@ knitr::kable(timeout_by_tp_exp2, digits = 1,
 # Statistical Models
 
 ```{r models}
+# Critical trials: same definition as Python (between_freqs; timed_out==0; 200 < rt < time_pressure*1000)
 d_critical_exp2 <- d_exp2 |>
-  filter(between_freqs, timed_out == 0, !is.na(responseFreq)) |>
+  filter(
+    between_freqs,
+    timed_out == 0,
+    !is.na(responseFreq),
+    rt > 200,
+    rt < time_pressure * 1000   # rt in ms, time_pressure in seconds
+  ) |>
   mutate(
     responded_lf = as.numeric(responseFreq == "LF"),
     time_pressure_c = ifelse(time_pressure == 5, -0.5, 0.5),
@@ -258,7 +301,7 @@ cat("  P(chose nearest | LF nearest):", round(mean(d_chose_nearest_exp2$chose_ne
 
 ```{r model-chose-nearest-fit}
 # Full model: is_hf_trial × payoff × time_pressure interaction + distance
-# Note: frequency_ratio is constant (1:4) across all participants, so using payoff_c instead
+# Design: frequency_ratio (1:2, 1:4) × time_pressure (5s, 10s) × payoff_structure (linear, binary)
 m_chose_nearest_exp2 <- glmer(
   chose_nearest ~ is_hf_trial_c * payoff_c * time_pressure_c + distance_c +
     (1 + distance_c | subject_id) + (1 | nearestLabel),
@@ -580,6 +623,17 @@ p_combined_effects_exp2
 ggsave(file.path(fig_path, "combined_effects_exp2.pdf"), p_combined_effects_exp2,
        width = 7, height = 5, dpi = 300)
 ```
+
+# Race Model Plots (separate document)
+
+Race model fit plots (P(LF) vs distance, schematic, P(LF)/P(HF) vs time) are in **`experiment2_race_model.qmd`**.
+
+**To generate them:**
+
+1. From the repo root: `python models/fit_exp2.py` (writes CSVs to `models/`).
+2. Render `experiment2_race_model.qmd` (e.g. Quarto render or "Run All" in that file).
+
+No other Experiment 2 data or analysis is needed for the race model document.
 
 # Response Time Analysis
 
