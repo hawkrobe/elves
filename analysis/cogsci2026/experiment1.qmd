@@ -153,6 +153,30 @@ knitr::kable(timeout_by_tp_exp1, digits = 1,
              col.names = c("Time Pressure (s)", "N Trials", "N Timeouts", "% Timeout"))
 ```
 
+```{r timeout-bias-check}
+# Check if timeouts are systematically biased toward LF or HF trials
+# (check timeouts don't disproportionately remove one frequency)
+
+timeout_by_nearest_exp1 <- d_exp1 |>
+  filter(between_freqs) |>
+  group_by(time_pressure, nearestFreq) |>
+  summarise(
+    n_trials = n(),
+    n_timeout = sum(timed_out, na.rm = TRUE),
+    pct_timeout = 100 * n_timeout / n_trials,
+    .groups = "drop"
+  )
+
+# Chi-square tests for each time pressure condition
+cat("\nChi-square tests: Are timeouts associated with nearest frequency?\n")
+for (tp in c(5, 10)) {
+  subset <- d_exp1 |> filter(between_freqs, time_pressure == tp)
+  contingency <- table(subset$nearestFreq, subset$timed_out)
+  test <- chisq.test(contingency)
+  cat(sprintf("  %ds deadline: χ² = %.2f, p = %.3f\n", tp, test$statistic, test$p.value))
+}
+```
+
 # Critical Trial Selection
 
 ```{r filter-critical}
@@ -207,8 +231,6 @@ summary(m_freq_exp1)
 ```
 
 # Model: Chose Nearest by Target Frequency
-
-This analysis examines whether participants chose the nearest trained angle as a function of whether that angle was HF or LF.
 
 ```{r model-chose-nearest-exp1}
 # Prepare data for chose-nearest analysis
@@ -397,19 +419,19 @@ race_model_pred <- function(dist_to_lf, freq_ratio, time_pressure) {
   # Convert distance to theta (model space: 0.5 = LF prototype)
   theta <- 0.5 - dist_to_lf / 90
 
-  # Interaction model parameters (8 params, trial-level NLL fit)
-  sigma <- 0.194
-  delta <- 0.620
+  # Interaction model parameters (delta fixed to 1, trial-level NLL fit)
+  sigma <- 0.195
+  delta <- 1.0
   lapse <- 0.157
 
   # B_HF varies by frequency ratio
-  B_hf <- ifelse(freq_ratio == "1:2", 0.497, 0.912)
+  B_hf <- ifelse(freq_ratio == "1:2", 0.500, 0.915)
 
   # Interaction model: T_5, T_10, gamma
   # T(5s, 1:2) = T_5, T(5s, 1:4) = T_5 + γ, T(10s, *) = T_10
-  T_5 <- 3.47
-  T_10 <- 5.66
-  gamma <- 1.53
+  T_5 <- 2.17
+  T_10 <- 3.54
+  gamma <- 0.96
 
   T <- case_when(
     freq_ratio == "1:2" & time_pressure == 5 ~ T_5,
@@ -522,7 +544,7 @@ rt_by_condition <- d_critical_exp1 |>
 fitted_T <- tibble(
   time_pressure = c(5, 5, 10, 10),
   frequency_ratio = c("1:2", "1:4", "1:2", "1:4"),
-  T_fitted = c(3.47, 5.00, 5.66, 5.66)  # Interaction model: T_5=3.47, T_10=5.66, γ=1.53
+  T_fitted = c(2.17, 3.13, 3.54, 3.54)  # Interaction model: T_5=2.17, T_10=3.54, γ=0.96
 )
 
 # Compare empirical RT to fitted T
@@ -538,6 +560,36 @@ knitr::kable(
   col.names = c("Time Pressure (s)", "Freq Ratio", "Mean RT (s)", "SD RT (s)", "N", "Fitted T", "T/RT Ratio"),
   caption = "Comparison of empirical mean RTs and fitted T parameters from race model"
 )
+```
+
+```{r rt-convergent-validity}
+# Convergent validity: T was fit to choice data only, but tracks empirical RTs
+# Collapse by time pressure for main comparison
+rt_by_tp <- d_critical_exp1 |>
+  group_by(time_pressure) |>
+  summarise(
+    M_rt = mean(rt) / 1000,
+    SD_rt = sd(rt) / 1000,
+    n = n(),
+    .groups = "drop"
+  )
+
+# Mean fitted T by time pressure (averaging across frequency ratio)
+T_by_tp <- fitted_T |>
+  group_by(time_pressure) |>
+  summarise(T_fitted = mean(T_fitted), .groups = "drop")
+
+rt_tp_comparison <- rt_by_tp |>
+  left_join(T_by_tp, by = "time_pressure")
+
+cat("=== CONVERGENT VALIDITY: T (fit to choices) tracks empirical RTs ===\n\n")
+cat("Collapsed by time pressure:\n")
+cat(sprintf("  Strict (5s):  T = %.2f, Mean RT = %.2f s\n",
+            rt_tp_comparison$T_fitted[1], rt_tp_comparison$M_rt[1]))
+cat(sprintf("  Lenient (10s): T = %.2f, Mean RT = %.2f s\n",
+            rt_tp_comparison$T_fitted[2], rt_tp_comparison$M_rt[2]))
+cat("\nKey finding: Despite T being fit solely to choice proportions,\n")
+cat("strict deadlines yield both lower T and faster RTs.\n")
 ```
 
 ```{r rt-interaction-test}
@@ -602,8 +654,6 @@ cat(sprintf("  Frequency ratio x distance: B = %.3f, z = %.2f, p %s\n",
 ```
 
 # Supplementary: Response Proportions by Target Frequency
-
-This analysis examines the proportion of HF, LF, and Other responses as a function of which frequency word is nearest to the target angle. "Other" responses are valid trained words that are neither the nearest nor next-nearest option. Restricted to ambiguous trials (>11° from nearest trained angle) to focus on cases where the target is clearly between two options.
 
 ```{r response-proportions-exp1, fig.width=8, fig.height=6}
 # Add response category: nearest, next-nearest, or other valid word
@@ -712,8 +762,6 @@ d_props_exp1 |>
 ```
 
 # Exploratory: Learning Quality Checks
-
-This section examines accuracy on exact-angle trials (timed production at trained angles) and untimed final recall trials to assess overall learning quality.
 
 ```{r load-accuracy-data-exp1}
 # Need trial_type to identify exact_angle trials, and response to identify final-recall
