@@ -40,7 +40,8 @@ fig_path <- here("latex/figures")
 
 cols_needed <- c("subject_id", "frequency_ratio", "time_pressure", "payoff_structure", "survey_difficulty",
                  "is_correct", "response", "response_text", "target", "angle", "targetFreq",
-                 "rt", "nearest_trained_angle", "timed_out", "total_points", "prolific_id")
+                 "rt", "nearest_trained_angle", "timed_out", "total_points", "prolific_id",
+                 "familiarization_block_iteration", "recall_iteration")
 
 # Normalize column names (some CSVs use "Time Pressure" etc.)
 normalize_cols <- function(df) {
@@ -103,6 +104,32 @@ cat("Total:", n_distinct(raw_data$subject_id), "participants\n")
 
 participant_bonus <- raw_data |>
   filter(is.na(prolific_id))
+```
+
+```{r avg-training-blocks}
+# Average number of training blocks before test phase: for each participant, max block; then mean across participants
+avg_training_blocks <- raw_data |>
+  filter(!is.na(familiarization_block_iteration)) |>
+  mutate(block = as.numeric(familiarization_block_iteration)) |>
+  group_by(subject_id) |>
+  summarise(max_block = max(block), .groups = "drop") |>
+  summarise(mean_blocks = mean(max_block), n = n()) |>
+  as.list()
+cat("Average training blocks before test: ", round(avg_training_blocks$mean_blocks, 2),
+    " (n = ", avg_training_blocks$n, " participants)\n", sep = "")
+```
+
+```{r avg-recall-blocks}
+# Average number of recall blocks: for each participant, max recall iteration; then mean across participants
+avg_recall_blocks <- raw_data |>
+  filter(!is.na(recall_iteration)) |>
+  mutate(block = as.numeric(recall_iteration)) |>
+  group_by(subject_id) |>
+  summarise(max_block = max(block), .groups = "drop") |>
+  summarise(mean_blocks = mean(max_block), n = n()) |>
+  as.list()
+cat("Average recall blocks: ", round(avg_recall_blocks$mean_blocks, 2),
+    " (n = ", avg_recall_blocks$n, " participants)\n", sep = "")
 ```
 
 ```{r extract-data}
@@ -634,6 +661,66 @@ Race model fit plots (P(LF) vs distance, schematic, P(LF)/P(HF) vs time) are in 
 No other Experiment 2 data or analysis is needed for the race model document.
 
 # Response Time Analysis
+
+```{r rt-by-condition-payoff-table}
+# Mean RT (s) by incentive x frequency x time pressure for the payoff/parameter table
+rt_payoff_table <- d_critical_exp2 |>
+  mutate(rt_s = rt / 1000) |>
+  group_by(frequency_ratio, payoff_structure, time_pressure) |>
+  summarise(mean_rt = mean(rt_s), .groups = "drop") |>
+  pivot_wider(
+    names_from = time_pressure,
+    values_from = mean_rt,
+    names_prefix = "rt_"
+  )
+
+# Fitted T values (e.g. from fit_exp2 with sigma=0.20, delta=1 fixed); update if using different fit
+T_payoff_table <- tibble(
+  frequency_ratio = c("1:2", "1:2", "1:4", "1:4"),
+  payoff_structure = c("linear", "binary", "linear", "binary"),
+  T_5 = c(1.43, 1.63, 1.71, 1.67),
+  T_10 = c(1.69, 1.76, 1.63, 1.87)
+)
+
+payoff_table <- T_payoff_table |>
+  left_join(
+    rt_payoff_table,
+    by = c("frequency_ratio", "payoff_structure")
+  ) |>
+  rename(mean_rt_5 = rt_5, mean_rt_10 = rt_10)
+
+# LaTeX table: FR, Payoff, T(5s), T(10s), Mean RT (5s), Mean RT (10s)
+payoff_table_latex <- payoff_table |>
+  mutate(
+    FR = frequency_ratio,
+    Payoff = str_to_title(payoff_structure),
+    across(c(T_5, T_10, mean_rt_5, mean_rt_10), \(x) sprintf("%.2f", x))
+  ) |>
+  select(FR, Payoff, T_5, T_10, mean_rt_5, mean_rt_10)
+```
+
+**Payoff table with fitted $T$ and mean human RT (s)** — paste into manuscript:
+
+```{r payoff-table-latex, echo=FALSE}
+cat("\\\\begin{table}[t]\n")
+cat("\\\\centering\n")
+cat("\\\\small\n")
+cat("\\\\begin{tabular}{llcccc}\n")
+cat("\\\\hline\n")
+cat("FR & Payoff & $T$ (5s) & $T$ (10s) & Mean RT (5s) & Mean RT (10s) \\\\\n")  # \\ in output
+cat("\\\\hline\n")
+for (i in 1:nrow(payoff_table_latex)) {
+  cat(paste(payoff_table_latex$FR[i], payoff_table_latex$Payoff[i],
+            payoff_table_latex$T_5[i], payoff_table_latex$T_10[i],
+            payoff_table_latex$mean_rt_5[i], payoff_table_latex$mean_rt_10[i],
+            sep = " & "), "\\\\\\\\\n")  # 4 backslashes in R -> \\ in output for LaTeX line break
+}
+cat("\\\\hline\n")
+cat("\\\\end{tabular}\n")
+cat("\\\\caption{Effective decision time parameter $T$ fits by condition ($\\\\sigma = 0.20$ and $\\\\delta=1$ fixed) and mean human RT (s) by condition.}\n")
+cat("\\\\label{tab:exp2params}\n")
+cat("\\\\end{table}\n")
+```
 
 ```{r rt-summary}
 d_critical_exp2 |>

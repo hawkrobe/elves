@@ -61,3 +61,11 @@ __pycache__/
 ### Quarto ###
 *_files/
 *.html
+.positai
+
+.DS_Store
+**/.DS_Store
+.claude/
+.idea/
+.vscode/
+prolific tracking/

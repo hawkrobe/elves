@@ -72,7 +72,7 @@ if (!file.exists(pred_race_exp2_path) || !file.exists(race_data_exp2_path)) {
     mutate(p_lf_se = sqrt(p_lf_mean * (1 - p_lf_mean) / n))
 
   # Time pressure: amber / magenta
-  colors_tp_race <- c("5" = "#D4A017", "10" = "#9C27B0")
+  colors_tp_race <- c("5" = "#c03b2b", "10" = "#2880ba")
 
   p_race_plf <- ggplot(pred_race_exp2, aes(x = dist_to_lf, y = p_lf,
                                            color = factor(time_pressure))) +
@@ -236,5 +236,42 @@ library(patchwork)
 exp2_activation_schematic / p_plf_phf_time  +  plot_layout(axes = "collect")  +  plot_annotation(tag_levels = 'A')
 
 ggsave(here(fig_path, "exp_2_activation_patterns.pdf"), width = 5, height = 4)
+```
+
+# RT Analysis
+
+```{r}
+rt_payoff_table <- d_critical_exp2 |>
+  mutate(rt_s = rt / 1000) |>
+  group_by(frequency_ratio, payoff_structure, time_pressure) |>
+  summarise(mean_rt = mean(rt_s), .groups = "drop") |>
+  pivot_wider(
+    names_from = time_pressure,
+    values_from = mean_rt,
+    names_prefix = "rt_"
+  )
+
+T_payoff_table <- tibble(
+  frequency_ratio = c("1:2", "1:2", "1:4", "1:4"),
+  payoff_structure = c("linear", "binary", "linear", "binary"),
+  T_5 = c(1.43, 1.63, 1.71, 1.67),
+  T_10 = c(1.69, 1.76, 1.63, 1.87)
+)
+
+payoff_table <- T_payoff_table |>
+  left_join(
+    rt_payoff_table,
+    by = c("frequency_ratio", "payoff_structure")
+  ) |>
+  rename(mean_rt_5 = rt_5, mean_rt_10 = rt_10)
+
+# LaTeX table: FR, Payoff, T(5s), T(10s), Mean RT (5s), Mean RT (10s)
+payoff_table_latex <- payoff_table |>
+  mutate(
+    FR = frequency_ratio,
+    Payoff = str_to_title(payoff_structure),
+    across(c(T_5, T_10, mean_rt_5, mean_rt_10), \(x) sprintf("%.2f", x))
+  ) |>
+  select(FR, Payoff, T_5, T_10, mean_rt_5, mean_rt_10)
 ```
 

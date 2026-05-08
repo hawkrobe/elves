@@ -39,6 +39,11 @@ import matplotlib.pyplot as plt
 import jax.numpy as jnp
 from fit import _compute_nll_vec, _race_model_vec
 
+# Sigma fixed from Experiment 1 fit (σ = 0.20) for cross-experiment comparability.
+# Fixing σ keeps T values on the same scale across experiments and removes the
+# σ ↔ T trade-off that would otherwise make direct comparisons uninterpretable.
+SIGMA_FIXED = 0.20
+
 
 # =============================================================================
 # Data loading (Exp 2: raw from exp2-0, exp2-1, exp2-2)
@@ -205,60 +210,32 @@ def load_data_exp2():
 
 
 # =============================================================================
-# NLL and fitting (up to 8 conditions: time_pressure × payoff_structure × frequency_ratio)
+# NLL functions (sigma fixed to SIGMA_FIXED throughout)
 # =============================================================================
+# Parameter count convention (sigma fixed, delta=1 fixed):
+#   Full (11):           B_12, B_14, lapse, T×8
+#   Shared B (10):       B_hf, lapse, T×8
+#   No payoff (7):       B_12, B_14, lapse, T×4  (T same for linear/binary)
+#   Additive payoff (8): B_12, B_14, lapse, T×4, gamma
+#   Payoff×TP (9):       B_12, B_14, lapse, T×4, gamma_5, gamma_10
+#   Payoff×FR (9):       B_12, B_14, lapse, T×4, gamma_12, gamma_14
+
+def _T_by_condition(params_T, df):
+    """Map base T params (T_5_12, T_10_12, T_5_14, T_10_14) to per-trial T array."""
+    T_5_12, T_10_12, T_5_14, T_10_14 = params_T
+    tp = df["time_pressure"].values
+    fr_12 = (df["frequency_ratio"] == "1:2").values
+    return np.where((tp == 5) & fr_12, T_5_12,
+             np.where((tp == 10) & fr_12, T_10_12,
+               np.where((tp == 5) & ~fr_12, T_5_14, T_10_14)))
+
 
 def nll_exp2(params, df):
-    """12 params: sigma, B_hf_12, B_hf_14, lapse, then 8 T values (linear/binary × 5/10 × 1:2/1:4)."""
-    sigma, B_12, B_14, lapse = params[0], params[1], params[2], params[3]
-    T_lin_5_12, T_lin_10_12, T_bin_5_12, T_bin_10_12 = params[4], params[5], params[6], params[7]
-    T_lin_5_14, T_lin_10_14, T_bin_5_14, T_bin_10_14 = params[8], params[9], params[10], params[11]
-    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
-        return 1e10
-    if any(t <= 0 for t in params[4:12]):
-        return 1e10
-    tp = df["time_pressure"].values
-    is_linear = (df["payoff_structure"] == "linear").values
-    fr_12 = (df["frequency_ratio"] == "1:2").values
-    T = np.where((tp == 5) & is_linear & fr_12, T_lin_5_12,
-          np.where((tp == 10) & is_linear & fr_12, T_lin_10_12,
-            np.where((tp == 5) & ~is_linear & fr_12, T_bin_5_12,
-              np.where((tp == 10) & ~is_linear & fr_12, T_bin_10_12,
-                np.where((tp == 5) & is_linear & ~fr_12, T_lin_5_14,
-                  np.where((tp == 10) & is_linear & ~fr_12, T_lin_10_14,
-                    np.where((tp == 5) & ~is_linear & ~fr_12, T_bin_5_14, T_bin_10_14)))))))
-    B_hf = np.where(fr_12, B_12, B_14)
-    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, sigma, lapse)
-
-
-def fit_model_exp2(df):
-    """Fit race model with B per frequency ratio and T per (time_pressure, payoff_structure, frequency_ratio)."""
-    # Starting values: sigma, B_12, B_14, lapse, then 8 T's (order: lin5_12, lin10_12, bin5_12, bin10_12, lin5_14, lin10_14, bin5_14, bin10_14)
-    x0 = [0.2, 0.5, 0.9, 0.15, 2.0, 3.5, 2.0, 3.5, 2.0, 3.5, 2.0, 3.5]
-    print(f"Fitting Exp 2 model ({len(df):,} trials)...")
-    result = minimize(nll_exp2, x0, args=(df,), method="Nelder-Mead",
-                      options={"maxiter": 3000, "xatol": 1e-4, "fatol": 1e-4})
-    names = [
-        "sigma", "B_hf_12", "B_hf_14", "lapse",
-        "T_linear_5_12", "T_linear_10_12", "T_binary_5_12", "T_binary_10_12",
-        "T_linear_5_14", "T_linear_10_14", "T_binary_5_14", "T_binary_10_14",
-    ]
-    params = dict(zip(names, result.x))
-    params["nll"] = result.fun
-    params["n_trials"] = len(df)
-    return params
-
-
-# =============================================================================
-# Model comparison (nested variants)
-# =============================================================================
-
-def nll_exp2_shared_B(params, df):
-    """11 params: sigma, B_hf (single), lapse, 8 T's. B same across frequency ratio."""
-    sigma, B_hf, lapse = params[0], params[1], params[2]
+    """Full model — 11 params: B_12, B_14, lapse, then 8 T values. sigma fixed."""
+    B_12, B_14, lapse = params[0], params[1], params[2]
     T_lin_5_12, T_lin_10_12, T_bin_5_12, T_bin_10_12 = params[3], params[4], params[5], params[6]
     T_lin_5_14, T_lin_10_14, T_bin_5_14, T_bin_10_14 = params[7], params[8], params[9], params[10]
-    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
+    if lapse < 0 or lapse > 0.5:
         return 1e10
     if any(t <= 0 for t in params[3:11]):
         return 1e10
@@ -272,24 +249,121 @@ def nll_exp2_shared_B(params, df):
                 np.where((tp == 5) & is_linear & ~fr_12, T_lin_5_14,
                   np.where((tp == 10) & is_linear & ~fr_12, T_lin_10_14,
                     np.where((tp == 5) & ~is_linear & ~fr_12, T_bin_5_14, T_bin_10_14)))))))
-    return _compute_nll_vec(df["theta"].values, T, np.full(len(df), B_hf), df["is_lf"].values, sigma, lapse)
+    B_hf = np.where(fr_12, B_12, B_14)
+    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, SIGMA_FIXED, lapse)
+
+
+def fit_model_exp2(df):
+    """Fit full race model (sigma fixed to SIGMA_FIXED, delta=1 fixed)."""
+    # 11 params: B_12, B_14, lapse, T_lin_5_12, T_lin_10_12, T_bin_5_12, T_bin_10_12,
+    #            T_lin_5_14, T_lin_10_14, T_bin_5_14, T_bin_10_14
+    x0 = [0.5, 0.9, 0.15, 1.4, 1.7, 1.6, 1.7, 1.6, 1.6, 1.6, 1.8]
+    print(f"Fitting Exp 2 model ({len(df):,} trials, sigma fixed to {SIGMA_FIXED})...")
+    result = minimize(nll_exp2, x0, args=(df,), method="Nelder-Mead",
+                      options={"maxiter": 3000, "xatol": 1e-4, "fatol": 1e-4})
+    names = [
+        "B_hf_12", "B_hf_14", "lapse",
+        "T_linear_5_12", "T_linear_10_12", "T_binary_5_12", "T_binary_10_12",
+        "T_linear_5_14", "T_linear_10_14", "T_binary_5_14", "T_binary_10_14",
+    ]
+    params = dict(zip(names, result.x))
+    params["sigma"] = SIGMA_FIXED  # stored so plotting functions can read params["sigma"]
+    params["nll"] = result.fun
+    params["n_trials"] = len(df)
+    return params
+
+
+# =============================================================================
+# Nested model variants (sigma fixed to SIGMA_FIXED throughout)
+# =============================================================================
+
+def nll_exp2_shared_B(params, df):
+    """10 params: B_hf (single), lapse, 8 T values. B same across frequency ratio."""
+    B_hf, lapse = params[0], params[1]
+    T_lin_5_12, T_lin_10_12, T_bin_5_12, T_bin_10_12 = params[2], params[3], params[4], params[5]
+    T_lin_5_14, T_lin_10_14, T_bin_5_14, T_bin_10_14 = params[6], params[7], params[8], params[9]
+    if lapse < 0 or lapse > 0.5:
+        return 1e10
+    if any(t <= 0 for t in params[2:10]):
+        return 1e10
+    tp = df["time_pressure"].values
+    is_linear = (df["payoff_structure"] == "linear").values
+    fr_12 = (df["frequency_ratio"] == "1:2").values
+    T = np.where((tp == 5) & is_linear & fr_12, T_lin_5_12,
+          np.where((tp == 10) & is_linear & fr_12, T_lin_10_12,
+            np.where((tp == 5) & ~is_linear & fr_12, T_bin_5_12,
+              np.where((tp == 10) & ~is_linear & fr_12, T_bin_10_12,
+                np.where((tp == 5) & is_linear & ~fr_12, T_lin_5_14,
+                  np.where((tp == 10) & is_linear & ~fr_12, T_lin_10_14,
+                    np.where((tp == 5) & ~is_linear & ~fr_12, T_bin_5_14, T_bin_10_14)))))))
+    return _compute_nll_vec(df["theta"].values, T, np.full(len(df), B_hf), df["is_lf"].values, SIGMA_FIXED, lapse)
 
 
 def nll_exp2_T_no_payoff(params, df):
-    """8 params: sigma, B_12, B_14, lapse, T_5_12, T_10_12, T_5_14, T_10_14. T same for linear/binary within (freq, time)."""
-    sigma, B_12, B_14, lapse = params[0], params[1], params[2], params[3]
-    T_5_12, T_10_12, T_5_14, T_10_14 = params[4], params[5], params[6], params[7]
-    if sigma <= 0.05 or sigma > 2.0 or lapse < 0 or lapse > 0.5:
+    """7 params: B_12, B_14, lapse, T_5_12, T_10_12, T_5_14, T_10_14. T same for linear/binary."""
+    B_12, B_14, lapse = params[0], params[1], params[2]
+    T_5_12, T_10_12, T_5_14, T_10_14 = params[3], params[4], params[5], params[6]
+    if lapse < 0 or lapse > 0.5:
         return 1e10
     if any(t <= 0 for t in [T_5_12, T_10_12, T_5_14, T_10_14]):
         return 1e10
+    T = _T_by_condition([T_5_12, T_10_12, T_5_14, T_10_14], df)
+    B_hf = np.where((df["frequency_ratio"] == "1:2").values, B_12, B_14)
+    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, SIGMA_FIXED, lapse)
+
+
+def nll_exp2_additive_payoff(params, df):
+    """8 params: B_12, B_14, lapse, T_5_12, T_10_12, T_5_14, T_10_14, gamma.
+    T_binary = T_base(FR, TP) + gamma — single payoff offset across all conditions."""
+    B_12, B_14, lapse = params[0], params[1], params[2]
+    T_base_params = params[3:7]
+    gamma = params[7]
+    if lapse < 0 or lapse > 0.5:
+        return 1e10
+    if any(t <= 0 for t in T_base_params):
+        return 1e10
+    T_base = _T_by_condition(T_base_params, df)
+    T = T_base + gamma * (df["payoff_structure"] == "binary").values
+    B_hf = np.where((df["frequency_ratio"] == "1:2").values, B_12, B_14)
+    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, SIGMA_FIXED, lapse)
+
+
+def nll_exp2_payoff_x_tp(params, df):
+    """9 params: B_12, B_14, lapse, T_5_12, T_10_12, T_5_14, T_10_14, gamma_5, gamma_10.
+    Payoff offset differs by time pressure: gamma_5 for 5s, gamma_10 for 10s."""
+    B_12, B_14, lapse = params[0], params[1], params[2]
+    T_base_params = params[3:7]
+    gamma_5, gamma_10 = params[7], params[8]
+    if lapse < 0 or lapse > 0.5:
+        return 1e10
+    if any(t <= 0 for t in T_base_params):
+        return 1e10
+    is_binary = (df["payoff_structure"] == "binary").values
     tp = df["time_pressure"].values
+    T_base = _T_by_condition(T_base_params, df)
+    gamma = np.where(tp == 5, gamma_5, gamma_10)
+    T = T_base + gamma * is_binary
+    B_hf = np.where((df["frequency_ratio"] == "1:2").values, B_12, B_14)
+    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, SIGMA_FIXED, lapse)
+
+
+def nll_exp2_payoff_x_fr(params, df):
+    """9 params: B_12, B_14, lapse, T_5_12, T_10_12, T_5_14, T_10_14, gamma_12, gamma_14.
+    Payoff offset differs by frequency ratio: gamma_12 for 1:2, gamma_14 for 1:4."""
+    B_12, B_14, lapse = params[0], params[1], params[2]
+    T_base_params = params[3:7]
+    gamma_12, gamma_14 = params[7], params[8]
+    if lapse < 0 or lapse > 0.5:
+        return 1e10
+    if any(t <= 0 for t in T_base_params):
+        return 1e10
+    is_binary = (df["payoff_structure"] == "binary").values
     fr_12 = (df["frequency_ratio"] == "1:2").values
-    T = np.where((tp == 5) & fr_12, T_5_12,
-          np.where((tp == 10) & fr_12, T_10_12,
-            np.where((tp == 5) & ~fr_12, T_5_14, T_10_14)))
+    T_base = _T_by_condition(T_base_params, df)
+    gamma = np.where(fr_12, gamma_12, gamma_14)
+    T = T_base + gamma * is_binary
     B_hf = np.where(fr_12, B_12, B_14)
-    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, sigma, lapse)
+    return _compute_nll_vec(df["theta"].values, T, B_hf, df["is_lf"].values, SIGMA_FIXED, lapse)
 
 
 def fit_model_comparison_exp2(df, full_params=None):
@@ -299,17 +373,20 @@ def fit_model_comparison_exp2(df, full_params=None):
     models = {}
 
     if full_params is None:
-        x0_full = [0.2, 0.5, 0.9, 0.15, 2.0, 3.5, 2.0, 3.5, 2.0, 3.5, 2.0, 3.5]
+        x0_full = [0.5, 0.9, 0.15, 1.4, 1.7, 1.6, 1.7, 1.6, 1.6, 1.6, 1.8]
     else:
         x0_full = [
-            full_params["sigma"], full_params["B_hf_12"], full_params["B_hf_14"], full_params["lapse"],
-            full_params["T_linear_5_12"], full_params["T_linear_10_12"], full_params["T_binary_5_12"], full_params["T_binary_10_12"],
-            full_params["T_linear_5_14"], full_params["T_linear_10_14"], full_params["T_binary_5_14"], full_params["T_binary_10_14"],
+            full_params["B_hf_12"], full_params["B_hf_14"], full_params["lapse"],
+            full_params["T_linear_5_12"], full_params["T_linear_10_12"],
+            full_params["T_binary_5_12"], full_params["T_binary_10_12"],
+            full_params["T_linear_5_14"], full_params["T_linear_10_14"],
+            full_params["T_binary_5_14"], full_params["T_binary_10_14"],
         ]
-    b_sig = (0.05, 2.0)
+
     b_B = (-2.0, 2.0)
     b_lapse = (0.001, 0.5)
     b_T = (0.1, 30.0)
+    b_gamma = (-5.0, 5.0)
 
     def fit_variant(name, nll_fn, x0, bounds, k):
         print(f"  {name}...", end=" ", flush=True)
@@ -317,26 +394,46 @@ def fit_model_comparison_exp2(df, full_params=None):
         print(f"NLL={result.fun:.1f}")
         return {"k": k, "nll": result.fun}
 
-    # Full (12)
+    # Full (11): B×FR, T×FR×payoff×TP
     models["Full (B×FR, T×FR×payoff×TP)"] = fit_variant(
-        "Full (12)", nll_exp2, x0_full,
-        [b_sig, b_B, b_B, b_lapse] + [b_T] * 8, 12)
+        "Full (11)", nll_exp2, x0_full,
+        [b_B, b_B, b_lapse] + [b_T] * 8, 11)
 
-    # Shared B (11)
-    x0_shared_B = [x0_full[0], (x0_full[1] + x0_full[2]) / 2, x0_full[3]] + x0_full[4:12]
+    # Shared B (10): single B_HF, T×FR×payoff×TP
+    x0_shared_B = [(x0_full[0] + x0_full[1]) / 2, x0_full[2]] + list(x0_full[3:11])
     models["Shared B_HF (T×FR×payoff×TP)"] = fit_variant(
-        "Shared B (11)", nll_exp2_shared_B, x0_shared_B,
-        [b_sig, b_B, b_lapse] + [b_T] * 8, 11)
+        "Shared B (10)", nll_exp2_shared_B, x0_shared_B,
+        [b_B, b_lapse] + [b_T] * 8, 10)
 
-    # T no payoff (8)
+    # No payoff (7): B×FR, T×FR×TP, payoff collapsed
     x0_no_payoff = [
-        x0_full[0], x0_full[1], x0_full[2], x0_full[3],
-        (x0_full[4] + x0_full[6]) / 2, (x0_full[5] + x0_full[7]) / 2,
-        (x0_full[8] + x0_full[10]) / 2, (x0_full[9] + x0_full[11]) / 2,
+        x0_full[0], x0_full[1], x0_full[2],
+        (x0_full[3] + x0_full[5]) / 2,   # T_5_12
+        (x0_full[4] + x0_full[6]) / 2,   # T_10_12
+        (x0_full[7] + x0_full[9]) / 2,   # T_5_14
+        (x0_full[8] + x0_full[10]) / 2,  # T_10_14
     ]
     models["T×FR×TP only (no payoff)"] = fit_variant(
-        "T no payoff (8)", nll_exp2_T_no_payoff, x0_no_payoff,
-        [b_sig, b_B, b_B, b_lapse] + [b_T] * 4, 8)
+        "No payoff (7)", nll_exp2_T_no_payoff, x0_no_payoff,
+        [b_B, b_B, b_lapse] + [b_T] * 4, 7)
+
+    # Additive payoff (8): single gamma offset for binary
+    x0_add = x0_no_payoff + [0.1]
+    models["Additive payoff (T×FR×TP + γ)"] = fit_variant(
+        "Additive payoff (8)", nll_exp2_additive_payoff, x0_add,
+        [b_B, b_B, b_lapse] + [b_T] * 4 + [b_gamma], 8)
+
+    # Payoff×TP (9): gamma differs by time pressure
+    x0_pay_tp = x0_no_payoff + [0.1, 0.1]
+    models["Payoff×TP (T×FR×TP + γ(TP))"] = fit_variant(
+        "Payoff×TP (9)", nll_exp2_payoff_x_tp, x0_pay_tp,
+        [b_B, b_B, b_lapse] + [b_T] * 4 + [b_gamma, b_gamma], 9)
+
+    # Payoff×FR (9): gamma differs by frequency ratio
+    x0_pay_fr = x0_no_payoff + [0.1, 0.1]
+    models["Payoff×FR (T×FR×TP + γ(FR))"] = fit_variant(
+        "Payoff×FR (9)", nll_exp2_payoff_x_fr, x0_pay_fr,
+        [b_B, b_B, b_lapse] + [b_T] * 4 + [b_gamma, b_gamma], 9)
 
     for m in models.values():
         m["aic"] = 2 * m["k"] + 2 * m["nll"]
@@ -811,13 +908,13 @@ def main():
 
     params = fit_model_exp2(df)
     n_obs = params["n_trials"]
-    k = 12
+    k = 11  # sigma fixed
     aic = 2 * k + 2 * params["nll"]
     bic = k * np.log(n_obs) + 2 * params["nll"]
     print()
-    print("FITTED PARAMETERS (Exp 2, δ = 1)")
+    print(f"FITTED PARAMETERS (Exp 2, σ = {SIGMA_FIXED} fixed, δ = 1 fixed)")
     print("-" * 50)
-    print(f"  σ = {params['sigma']:.3f}, λ = {params['lapse']:.3f}")
+    print(f"  λ = {params['lapse']:.3f}")
     print(f"  B_HF 1:2 = {params['B_hf_12']:.3f}, B_HF 1:4 = {params['B_hf_14']:.3f}")
     print("  T by (freq_ratio, payoff, time):")
     for fr in ["1:2", "1:4"]:
@@ -829,7 +926,6 @@ def main():
     print("FIT (trial-level NLL)")
     print("-" * 50)
     print(f"  NLL = {params['nll']:.1f}   AIC = {aic:.1f}   BIC = {bic:.1f}   N = {n_obs:,} trials")
-    # Binned fit quality: correlation of observed vs predicted P(LF)
     _print_binned_fit_quality(df, params)
     print()
 
@@ -845,22 +941,34 @@ def main():
     model_variants, n_obs = fit_model_comparison_exp2(df, full_params=params)
     print()
     sorted_models = sorted(model_variants.items(), key=lambda x: x[1]["aic"])
-    print(f"{'Model':<32} {'k':>3} {'NLL':>12} {'AIC':>12} {'BIC':>12} {'ΔAIC':>8}")
-    print("-" * 82)
+    print(f"{'Model':<40} {'k':>3} {'NLL':>12} {'AIC':>12} {'BIC':>12} {'ΔAIC':>8}")
+    print("-" * 92)
     best_aic = sorted_models[0][1]["aic"]
     for name, m in sorted_models:
         delta_aic = m["aic"] - best_aic
-        print(f"{name:<32} {m['k']:>3} {m['nll']:>12.1f} {m['aic']:>12.1f} {m['bic']:>12.1f} {delta_aic:>8.1f}")
+        print(f"{name:<40} {m['k']:>3} {m['nll']:>12.1f} {m['aic']:>12.1f} {m['bic']:>12.1f} {delta_aic:>8.1f}")
     print()
-    nll_full = model_variants["Full (B×FR, T×FR×payoff×TP)"]["nll"]
-    nll_shared_B = model_variants["Shared B_HF (T×FR×payoff×TP)"]["nll"]
-    nll_no_payoff = model_variants["T×FR×TP only (no payoff)"]["nll"]
+
     from scipy.stats import chi2
-    print("Likelihood ratio tests (nested):")
+    nll_full     = model_variants["Full (B×FR, T×FR×payoff×TP)"]["nll"]
+    nll_shared_B = model_variants["Shared B_HF (T×FR×payoff×TP)"]["nll"]
+    nll_no_pay   = model_variants["T×FR×TP only (no payoff)"]["nll"]
+    nll_add_pay  = model_variants["Additive payoff (T×FR×TP + γ)"]["nll"]
+    nll_pay_tp   = model_variants["Payoff×TP (T×FR×TP + γ(TP))"]["nll"]
+    nll_pay_fr   = model_variants["Payoff×FR (T×FR×TP + γ(FR))"]["nll"]
+
+    print("Likelihood ratio tests:")
+    print("-" * 60)
     lr = 2 * (nll_shared_B - nll_full)
-    print(f"  Full vs Shared B:     LR = {lr:.2f}, df = 1, p = {1 - chi2.cdf(lr, 1):.3f}")
-    lr = 2 * (nll_no_payoff - nll_full)
-    print(f"  Full vs T no payoff:  LR = {lr:.2f}, df = 4, p = {1 - chi2.cdf(lr, 4):.3f}")
+    print(f"  B×FR effect (Full vs Shared B):           LR={lr:.2f}, df=1, p={1-chi2.cdf(lr,1):.3f}")
+    lr = 2 * (nll_no_pay - nll_add_pay)
+    print(f"  Main effect of payoff (Additive vs None): LR={lr:.2f}, df=1, p={1-chi2.cdf(lr,1):.3f}")
+    lr = 2 * (nll_add_pay - nll_pay_tp)
+    print(f"  Payoff×TP interaction (vs Additive):      LR={lr:.2f}, df=1, p={1-chi2.cdf(lr,1):.3f}")
+    lr = 2 * (nll_add_pay - nll_pay_fr)
+    print(f"  Payoff×FR interaction (vs Additive):      LR={lr:.2f}, df=1, p={1-chi2.cdf(lr,1):.3f}")
+    lr = 2 * (nll_pay_tp - nll_full)
+    print(f"  Three-way Payoff×TP×FR (Full vs Pay×TP): LR={lr:.2f}, df=2, p={1-chi2.cdf(lr,2):.3f}")
     print()
 
     print("Plotting (2×2 facets: FR × payoff; Strict/Lenient = red/blue)...")

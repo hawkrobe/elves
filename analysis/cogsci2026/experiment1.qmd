@@ -40,7 +40,8 @@ raw_files <- list.files(raw_data_path, full.names = TRUE) |>
 
 cols_needed <- c("subject_id", "frequency_ratio", "time_pressure", "survey_difficulty",
                  "is_correct", "response", "response_text", "target", "angle", "targetFreq",
-                 "rt", "nearest_trained_angle", "timed_out")
+                 "rt", "nearest_trained_angle", "timed_out", "familiarization_block_iteration",
+                 "recall_iteration")
 
 raw_data <- map_dfr(raw_files, \(f) {
   read_csv(f, show_col_types = FALSE) |>
@@ -49,6 +50,32 @@ raw_data <- map_dfr(raw_files, \(f) {
 })
 
 cat("Loaded", n_distinct(raw_data$subject_id), "participants\n")
+```
+
+```{r avg-training-blocks}
+# Average number of training blocks before test phase: for each participant, max block; then mean across participants
+avg_training_blocks <- raw_data |>
+  filter(!is.na(familiarization_block_iteration)) |>
+  mutate(block = as.numeric(familiarization_block_iteration)) |>
+  group_by(subject_id) |>
+  summarise(max_block = max(block), .groups = "drop") |>
+  summarise(mean_blocks = mean(max_block), n = n()) |>
+  as.list()
+cat("Average training blocks before test: ", round(avg_training_blocks$mean_blocks, 2),
+    " (n = ", avg_training_blocks$n, " participants)\n", sep = "")
+```
+
+```{r avg-recall-blocks}
+# Average number of recall blocks: for each participant, max recall iteration; then mean across participants
+avg_recall_blocks <- raw_data |>
+  filter(!is.na(recall_iteration)) |>
+  mutate(block = as.numeric(recall_iteration)) |>
+  group_by(subject_id) |>
+  summarise(max_block = max(block), .groups = "drop") |>
+  summarise(mean_blocks = mean(max_block), n = n()) |>
+  as.list()
+cat("Average recall blocks: ", round(avg_recall_blocks$mean_blocks, 2),
+    " (n = ", avg_recall_blocks$n, " participants)\n", sep = "")
 ```
 
 ```{r extract-data}
